@@ -6,14 +6,33 @@
 
     Supported: TCP and Unix-domain sockets; trust, password, MD5 and SCRAM-SHA-256
     authentication (without channel binding); TLS through [sslmode] [prefer], [require],
-    [verify-ca] and [verify-full], with the system trust store or [sslrootcert]; prepared
-    statements cached per connection, prepared in the same write as their first execution;
-    [:copy]; every diagnostic field; server-side cancellation.
+    [verify-ca] and [verify-full], with the system trust store or [sslrootcert];
+    [require_auth]; prepared statements cached per connection, prepared in the same write
+    as their first execution; [:copy]; every diagnostic field; server-side cancellation.
 
     Not supported, and reported as an error rather than ignored: several hosts in one
     connection string, GSSAPI and SSPI, client certificates, [.pgpass] and service files,
-    SCRAM channel binding. Passwords are sent as given, without SASLprep, which only
-    matters for non-ASCII passwords. Use [sqlkit-eio] where one of these is required.
+    SCRAM channel binding, and the [PG*] environment variables that ask for any of these.
+    Passwords are sent as given, without SASLprep, which only matters for non-ASCII
+    passwords. Use [sqlkit-eio] where one of these is required.
+
+    {2 What the defaults do and do not protect}
+
+    - [sslmode] defaults to [prefer], as in libpq: TLS when the server offers it, with no
+      check of who the server is. Someone on the network path can remove the encryption or
+      stand in for the server. Only [verify-full] (or [verify-ca] with your own root)
+      identifies the server.
+    - The server chooses the authentication method. Unless [require_auth] says otherwise
+      the driver goes along with MD5, SCRAM or none at all; it sends the password itself
+      only over TLS or a Unix socket. On an unverified connection a stand-in server can
+      therefore still collect an MD5 response or, over unverified TLS, the password. Set
+      [require_auth=scram-sha-256] to refuse everything but SCRAM, which also makes the
+      server prove it knows the password.
+    - There is no channel binding, so SCRAM over unverified TLS does not detect an
+      intermediary that relays the exchange.
+    - Session state survives from one pool borrower to the next: settings changed with
+      [SET], temporary tables, advisory locks. Transactions do not; a connection returned
+      with one open is discarded.
 
     {[
     Eio_main.run @@ fun env ->
@@ -37,6 +56,7 @@ val connect :
   ?limits:Sqlkit.Limits.t ->
   ?connect_timeout:float ->
   ?query_timeout:float ->
+  ?max_result_bytes:int ->
   ?observe:Sqlkit.Telemetry.observer ->
   string ->
   (Sqlkit.conn, Sqlkit.Error.t) result
@@ -44,8 +64,11 @@ val connect :
     default to 10 seconds for connection establishment and 35 seconds per query operation.
     Handles must be used sequentially, from the domain that opened them.
 
-    [sslmode] defaults to [prefer], as in libpq: TLS when the server offers it, without
-    verifying the certificate. Ask for [verify-full] on any network you do not control.
+    [connect_timeout] in the connection string can shorten the deadline but not extend it.
+    [max_result_bytes] (default 256 MiB) bounds everything the server sends in reply to
+    one statement; beyond it the statement fails and the connection is dropped, so a
+    server cannot grow the process without limit. One handle serves one fiber at a time; a
+    second concurrent use is refused.
 
     A statement that is cancelled or exceeds [query_timeout] costs the connection: the
     server is asked to stop and the handle becomes unusable. *)
@@ -61,6 +84,7 @@ module Pool : sig
     ?acquire_timeout:float ->
     ?connect_timeout:float ->
     ?query_timeout:float ->
+    ?max_result_bytes:int ->
     ?limits:Sqlkit.Limits.t ->
     ?observe:Sqlkit.Telemetry.observer ->
     string ->

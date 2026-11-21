@@ -136,7 +136,7 @@ let scram () =
   let server_first =
     "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
   in
-  (match Scram.client_final ~password:"pencil" ~nonce ~server_first with
+  (match Scram.client_final ~password:"pencil" ~nonce ~server_first () with
   | Error why -> check ("client final: " ^ why) false
   | Ok (message, expected) ->
       check "client final echoes the combined nonce and binding"
@@ -173,7 +173,7 @@ let scram () =
       check "missing server signature is refused"
         (not (Scram.verify expected ~server_final:"e=x")));
   let refused server_first =
-    match Scram.client_final ~password:"p" ~nonce:"abc" ~server_first with
+    match Scram.client_final ~password:"p" ~nonce:"abc" ~server_first () with
     | Error _ -> true
     | Ok _ -> false
   in
@@ -229,8 +229,76 @@ let conninfo () =
   check "bad sslmode" (refused "host=a user=u sslmode=maybe");
   check "unterminated quote" (refused "host=a user='u")
 
+(* Regressions from the security review. *)
+let hardening () =
+  let raises f = match f () with exception Invalid_argument _ -> true | _ -> false in
+  check "a length that does not fit its field is never written"
+    (raises (fun () ->
+         let b = Buffer.create 16 in
+         Wire.bind b ~statement:"s" (Array.make 70_000 None)));
+  check "statement size counts every parameter"
+    (Wire.statement_size ~sql:"SELECT 1" [| Some "abcd"; None |] >= 8 + 8 + 4);
+  let parse = Conninfo.parse in
+  let refused s = match parse s with Error _ -> true | Ok _ -> false in
+  (match parse "postgresql://u:a%2Cb@h/d?options=-c%20x%3D1,y" with
+  | Ok c ->
+      check "commas in values survive"
+        (c.password = Some "a,b" && c.options = Some "-c x=1,y")
+  | Error why -> check ("commas: " ^ why) false);
+  check "sslmode with trailing junk is not read as the default"
+    (refused "postgresql://u@h/d?sslmode=verify-full,x");
+  check "second @ is refused, not guessed at" (refused "postgresql://u:SEC@RET@h/db");
+  check "fragment is refused" (refused "postgresql://u:SECRET#PW@h/db");
+  check "non-numeric port is refused" (refused "postgresql://u@h:54a32/db");
+  check "percent-encoded NUL in the database is refused"
+    (refused "postgresql://u@h/db%00application_name%00x");
+  check "percent-encoded NUL in the password is refused"
+    (refused "postgresql://u:p%00q@h/db");
+  check "repeated key is refused" (refused "host=a host=b user=u");
+  check "verify-ca without a root is refused" (refused "host=a user=u sslmode=verify-ca");
+  (match parse "host=a user=u sslmode=require sslrootcert=/tmp/ca.pem" with
+  | Ok c -> check "require with a root verifies the chain" (c.sslmode = Verify_ca)
+  | Error why -> check ("require+root: " ^ why) false);
+  (match parse "host=a user=u sslmode=require sslrootcert=system" with
+  | Ok c ->
+      check "sslrootcert=system means verify-full"
+        (c.sslmode = Verify_full && c.sslrootcert = None)
+  | Error why -> check ("system root: " ^ why) false);
+  (match parse "host=a user=u require_auth=scram-sha-256" with
+  | Ok c -> check "require_auth: one method" (c.require_auth = Some [ Scram_sha_256 ])
+  | Error why -> check ("require_auth: " ^ why) false);
+  (match parse "postgresql://u@h/d?require_auth=!password,!md5" with
+  | Ok c ->
+      check "require_auth: negations"
+        (c.require_auth = Some [ Scram_sha_256; No_authentication ])
+  | Error why -> check ("require_auth negated: " ^ why) false);
+  check "require_auth: mixed forms refused"
+    (refused "host=a user=u require_auth=md5,!password");
+  check "require_auth: unknown method refused" (refused "host=a user=u require_auth=gss");
+  (match parse "host=a user=u connect_timeout=3" with
+  | Ok c -> check "connect_timeout is kept" (c.connect_timeout = Some 3.)
+  | Error why -> check ("connect_timeout: " ^ why) false);
+  let challenge i = Printf.sprintf "r=abcdef,s=c2FsdA==,i=%s" i in
+  let scram_refused server_first =
+    match Scram.client_final ~password:"p" ~nonce:"abc" ~server_first () with
+    | Error _ -> true
+    | Ok _ -> false
+  in
+  check "iteration count above the cap is refused"
+    (scram_refused (challenge (string_of_int (Scram.max_iterations + 1))));
+  check "hexadecimal iteration count is refused" (scram_refused (challenge "0x1000"));
+  check "mandatory extension is refused" (scram_refused ("m=x," ^ challenge "4096"));
+  check "empty salt is refused" (scram_refused "r=abcdef,s=,i=4096");
+  let pauses = ref 0 in
+  ignore
+    (Scram.client_final
+       ~pause:(fun () -> incr pauses)
+       ~password:"p" ~nonce:"abc" ~server_first:(challenge "20000") ());
+  check "key derivation pauses as it goes" (!pauses >= 5)
+
 let () =
   frontend ();
+  hardening ();
   backend ();
   decoder_is_total ();
   scram ();

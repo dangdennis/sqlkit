@@ -10,13 +10,20 @@ val client_first : nonce:string -> string
 type expected
 (** The server signature a genuine server will send. *)
 
+val max_iterations : int
+(** A challenge asking for more is refused. *)
+
 val client_final :
+  ?pause:(unit -> unit) ->
   password:string ->
   nonce:string ->
   server_first:string ->
+  unit ->
   (string * expected, string) result
 (** The client's final message. Fails when the server's first message is malformed, does
-    not extend our nonce, or asks for an unreasonable iteration count. *)
+    not extend our nonce, names an extension, or asks for an unreasonable iteration count.
+    [pause] is called every few thousand iterations of the key derivation, so a
+    cooperative scheduler can run and a deadline can fire. *)
 
 val verify : expected -> server_final:string -> bool
 (** Constant-time check that the server knew the password verifier. *)

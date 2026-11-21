@@ -27,6 +27,15 @@ val copy_data : Buffer.t -> string -> unit
 val copy_done : Buffer.t -> unit
 val copy_fail : Buffer.t -> string -> unit
 
+val max_frontend_message : int
+(** Largest message PostgreSQL accepts. Builders raise [Invalid_argument] rather than
+    write a length or count that does not fit its field; callers check first. *)
+
+val max_parameters : int
+
+val statement_size : sql:string -> string option array -> int
+(** Upper bound on the bytes one Parse + Bind for these arguments occupies. *)
+
 (** {1 Backend} *)
 
 type auth =
@@ -77,7 +86,10 @@ type backend =
   | Negotiate_protocol_version
 
 val max_message : int
-(** Largest payload the driver accepts, in bytes. *)
+(** Largest payload the driver accepts once a session is established, in bytes. *)
+
+val max_startup_message : int
+(** Largest payload accepted before authentication has finished. *)
 
 val decode : char -> string -> (backend, string) result
 (** [decode tag payload], where [payload] excludes the tag and the length word. *)

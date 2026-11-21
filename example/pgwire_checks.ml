@@ -112,6 +112,181 @@ let () =
   check "3 MB round trip over TLS"
     (D.query raw ~sql:"SELECT $1::text" ~params:[ Sqlkit.Value.Text big ] ~columns:1
     = Ok [ [| Sqlkit.Value.Text big |] ]);
+  (* ---- a hostile server ----
+     Each case plays one side of the protocol badly and watches what the
+     client does. [script] gets the connection after the startup message has
+     been read. *)
+  let message tag payload =
+    let b = Buffer.create (String.length payload + 5) in
+    Buffer.add_char b tag;
+    Buffer.add_int32_be b (Int32.of_int (String.length payload + 4));
+    Buffer.add_string b payload;
+    Buffer.contents b
+  in
+  let int32 n =
+    let b = Bytes.create 4 in
+    Bytes.set_int32_be b 0 (Int32.of_int n);
+    Bytes.to_string b
+  in
+  let auth code rest = message 'R' (int32 code ^ rest) in
+  let ready = message 'Z' "I" in
+  let read_some flow =
+    let buf = Cstruct.create 65536 in
+    match Eio.Flow.single_read flow buf with
+    | n -> Cstruct.to_string (Cstruct.sub buf 0 n)
+    | exception End_of_file -> ""
+    | exception Eio.Io _ -> ""
+  in
+  let hostile ?(parameters = "") script client =
+    let listener =
+      Eio.Net.listen env#net ~sw ~reuse_addr:true ~backlog:1
+        (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+    in
+    let port = match Eio.Net.listening_addr listener with `Tcp (_, p) -> p | _ -> 0 in
+    let result = ref None in
+    Eio.Fiber.both
+      (fun () ->
+        Eio.Switch.run (fun server_sw ->
+            let flow, _ = Eio.Net.accept ~sw:server_sw listener in
+            ignore (read_some flow);
+            (try script flow with Eio.Io _ | End_of_file -> ());
+            Eio.Net.close listener))
+      (fun () ->
+        result :=
+          Some
+            (client
+               (Printf.sprintf
+                  "host=127.0.0.1 port=%d user=u password=hunter2 dbname=d \
+                   sslmode=disable%s"
+                  port parameters)));
+    Option.get !result
+  in
+  let connect_refused = function Error (Sqlkit.Error.Connect _) -> true | _ -> false in
+  let seen = ref "" in
+  check "password is not sent in clear over an unencrypted connection"
+    (connect_refused
+       (hostile
+          (fun flow ->
+            Eio.Flow.copy_string (auth 3 "") flow;
+            seen := read_some flow)
+          connect)
+    && !seen = "");
+  seen := "";
+  check "unless the caller asked for exactly that"
+    (match
+       hostile ~parameters:" require_auth=password"
+         (fun flow ->
+           Eio.Flow.copy_string (auth 3 "") flow;
+           seen := read_some flow;
+           Eio.Flow.copy_string (auth 0 "" ^ ready) flow;
+           ignore (read_some flow);
+           Eio.Flow.copy_string ready flow)
+         connect
+     with
+    | Ok _ -> !seen = message 'p' "hunter2\000"
+    | Error _ -> false);
+  seen := "";
+  check "a password request after SCRAM has started is refused"
+    (connect_refused
+       (hostile ~parameters:" require_auth=scram-sha-256,password"
+          (fun flow ->
+            Eio.Flow.copy_string (auth 10 "SCRAM-SHA-256\000\000") flow;
+            ignore (read_some flow);
+            Eio.Flow.copy_string (auth 3 "") flow;
+            seen := read_some flow)
+          connect)
+    && !seen = "");
+  check "require_auth=scram-sha-256 refuses a server that asks for nothing"
+    (connect_refused
+       (hostile ~parameters:" require_auth=scram-sha-256"
+          (fun flow -> Eio.Flow.copy_string (auth 0 "" ^ ready) flow)
+          connect));
+  let started = Unix.gettimeofday () in
+  check "an absurd SCRAM cost is refused, not computed"
+    (connect_refused
+       (hostile
+          (fun flow ->
+            Eio.Flow.copy_string (auth 10 "SCRAM-SHA-256\000\000") flow;
+            let initial = read_some flow in
+            (* echo the client's nonce, extended, with a ruinous iteration count *)
+            let nonce =
+              match String.index_opt initial '=' with
+              | Some _ ->
+                  let i = String.length initial - 24 in
+                  String.sub initial i 24
+              | None -> ""
+            in
+            Eio.Flow.copy_string
+              (auth 11 (Printf.sprintf "r=%sXYZ,s=c2FsdA==,i=10000000" nonce))
+              flow;
+            ignore (read_some flow))
+          connect)
+    && Unix.gettimeofday () -. started < 2.);
+  check "an oversized message before authentication is refused"
+    (connect_refused
+       (hostile
+          (fun flow ->
+            Eio.Flow.copy_string ("R" ^ int32 0x40000004) flow;
+            ignore (read_some flow))
+          connect));
+  check "a reply stream past max_result_bytes fails the statement"
+    (match
+       hostile
+         (fun flow ->
+           Eio.Flow.copy_string (auth 0 "" ^ ready) flow;
+           ignore (read_some flow);
+           Eio.Flow.copy_string ready flow;
+           ignore (read_some flow);
+           let row = message 'D' "\000\001" ^ "" in
+           let row = message 'D' ("\000\001" ^ int32 1000 ^ String.make 1000 'x') ^ row in
+           let chunk = String.concat "" (List.init 200 (fun _ -> row)) in
+           for _ = 1 to 200 do
+             Eio.Flow.copy_string chunk flow
+           done)
+         (fun conninfo ->
+           Sqlkit_pgwire.connect ~sw ~net:env#net ~clock:env#mono_clock
+             ~connect_timeout:5. ~max_result_bytes:(1024 * 1024) conninfo
+           |> Result.map (fun conn -> rows conn "SELECT 1"))
+     with
+    | Ok (Error e) -> e.sqlstate = None
+    | _ -> false);
+  check "a second ReadyForQuery is not taken for the next statement's reply"
+    (match
+       hostile
+         (fun flow ->
+           Eio.Flow.copy_string (auth 0 "" ^ ready) flow;
+           ignore (read_some flow);
+           Eio.Flow.copy_string (ready ^ ready) flow;
+           ignore (read_some flow))
+         (fun conninfo ->
+           connect conninfo
+           |> Result.map (fun conn ->
+               Eio.Time.Mono.sleep env#mono_clock 0.05;
+               rows conn "SELECT 1"))
+     with
+    | Ok (Error _) -> true
+    | _ -> false);
+  (* ---- names that cannot be checked against a certificate ---- *)
+  refuses "verify-full refuses a host it cannot compare with the certificate"
+    (base "a_b.localhost" ^ " sslmode=verify-full sslrootcert=" ^ root);
+  check "verify-ca without a root is refused before connecting"
+    (match connect (base "127.0.0.1" ^ " sslmode=verify-ca") with
+    | Error (Sqlkit.Error.Invalid_argument _) -> true
+    | _ -> false);
+  connects "require with a root verifies the chain"
+    (base "127.0.0.1" ^ " sslmode=require sslrootcert=" ^ root)
+    yes;
+  (* one handle, two fibers *)
+  let shared = Result.get_ok (connect (base "127.0.0.1" ^ " sslmode=require")) in
+  let slow = ref None and quick = ref None in
+  Eio.Fiber.both
+    (fun () -> slow := Some (rows shared "SELECT pg_sleep(0.1)::text"))
+    (fun () -> quick := Some (rows shared "SELECT 2::text"));
+  check "concurrent use of one handle is refused, not interleaved"
+    ((match (!slow, !quick) with
+       | Some (Ok _), Some (Error e) -> e.sqlstate = None
+       | _ -> false)
+    && rows shared "SELECT 3::text" = Ok [ [| Sqlkit.Value.Text "3" |] ]);
   if !failures = 0 then print_endline "all good"
   else (
     Printf.printf "%d failure(s)\n" !failures;

@@ -1,6 +1,19 @@
 (* ---------- frontend ---------- *)
 
-let add_int32 b n = Buffer.add_int32_be b (Int32.of_int n)
+(* PostgreSQL refuses anything longer, and a length that does not fit its
+   field must never be written: truncated to 32 bits it would make the server
+   read the rest of the payload as new messages. The driver checks sizes before
+   building; these raise so that a missed check cannot become a wrapped length. *)
+let max_frontend_message = 0x3FFFFFFF
+let max_parameters = 0xFFFF
+
+let add_int32 b n =
+  if n < 0 || n > max_frontend_message then invalid_arg "Wire: length out of range";
+  Buffer.add_int32_be b (Int32.of_int n)
+
+let add_count b n =
+  if n < 0 || n > max_parameters then invalid_arg "Wire: count out of range";
+  Buffer.add_int16_be b n
 
 let add_cstring b s =
   Buffer.add_string b s;
@@ -71,7 +84,7 @@ let bind b ~statement params =
   add_cstring b "";
   add_cstring b statement;
   Buffer.add_int16_be b 0;
-  Buffer.add_int16_be b (Array.length params);
+  add_count b (Array.length params);
   Array.iter
     (function
       | None -> Buffer.add_int32_be b (-1l)
@@ -97,6 +110,12 @@ let copy_data b data =
   Buffer.add_string b data
 
 let copy_done b = header b 'c' 0
+
+let statement_size ~sql params =
+  Array.fold_left
+    (fun n p -> n + 4 + match p with Some s -> String.length s | None -> 0)
+    (String.length sql + 64)
+    params
 
 let copy_fail b reason =
   header b 'f' (String.length reason + 1);
@@ -152,6 +171,7 @@ type backend =
   | Negotiate_protocol_version
 
 let max_message = 1 lsl 30
+let max_startup_message = 64 * 1024
 
 (* Every read below is bounds-checked by the standard library; [decode] turns
    the resulting exception into an error, so a hostile or corrupt payload cannot

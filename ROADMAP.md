@@ -266,7 +266,14 @@ Still open:
 - A batch API that exposes pipelining to callers.
 - `sqlkit-pgwire`: SCRAM channel binding, SASLprep for non-ASCII passwords,
   client certificates, `.pgpass`, several hosts, GSSAPI. Each is refused
-  loudly today. An independent review of the authentication code.
+  loudly today.
+- `sqlkit-pgwire` had one adversarial review (2026-11-21); its findings are
+  fixed and covered by `test/test_pgwire.ml` and the hostile-server cases in
+  `example/pgwire_checks.ml`. Not yet done: a review by someone other than
+  its author's tooling, the same hardening pass on `sqlkit-eio` (no guard
+  against two fibers on one handle, no reply budget), a stale reply that
+  arrives after the between-statements check, and bytes already decrypted by
+  the TLS layer being invisible to the pool's health check.
 - `sqlkit-pgwire`: move the generator onto it (RowDescription carries the table
   and column identifiers it needs), which would remove libpq from the project.
 - `sqlkit-eio`: a nonblocking cancel request once libpq 17 is the floor (today

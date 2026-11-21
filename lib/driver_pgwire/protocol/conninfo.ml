@@ -1,4 +1,5 @@
 type sslmode = Disable | Prefer | Require | Verify_ca | Verify_full
+type auth = Scram_sha_256 | Md5 | Password | No_authentication
 
 type t = {
   host : string;
@@ -8,11 +9,14 @@ type t = {
   database : string;
   sslmode : sslmode;
   sslrootcert : string option;
+  require_auth : auth list option;
+  connect_timeout : float option;
   application_name : string option;
   options : string option;
 }
 
 let ( let* ) = Result.bind
+let digits s = s <> "" && String.for_all (function '0' .. '9' -> true | _ -> false) s
 
 (* key=value pairs separated by whitespace; a value may be single-quoted, and
    inside quotes a backslash escapes the next character. *)
@@ -57,13 +61,56 @@ let keywords s =
   in
   pairs 0 []
 
-let uri s =
-  let u = Uri.of_string s in
-  let query =
-    List.filter_map
-      (fun (k, vs) -> match vs with [ v ] -> Some (k, v) | _ -> None)
-      (Uri.query u)
+(* The URI library accepts almost anything and guesses, which for a credential
+   means sending part of a password to whatever host the guess produced. The
+   shape is checked here first, and only then handed over for decoding. A
+   password containing [@], [:], [/], [?] or [#] must be percent-encoded. *)
+let well_formed s =
+  let after_scheme =
+    let i = String.index s ':' in
+    String.sub s (i + 3) (String.length s - i - 3)
   in
+  let authority =
+    let stop =
+      List.fold_left
+        (fun stop c ->
+          match String.index_opt after_scheme c with Some i -> min stop i | None -> stop)
+        (String.length after_scheme) [ '/'; '?' ]
+    in
+    String.sub after_scheme 0 stop
+  in
+  let hostport =
+    match String.rindex_opt authority '@' with
+    | Some i -> String.sub authority (i + 1) (String.length authority - i - 1)
+    | None -> authority
+  in
+  let port_ok p =
+    p = ""
+    || String.length p > 1
+       && p.[0] = ':'
+       && digits (String.sub p 1 (String.length p - 1))
+  in
+  if String.contains s '#' then
+    Error "connection URI must not contain '#'; percent-encode it"
+  else if List.length (String.split_on_char '@' authority) > 2 then
+    Error "connection URI has more than one '@'; percent-encode it in the password"
+  else if String.length hostport > 0 && hostport.[0] = '[' then
+    match String.index_opt hostport ']' with
+    | Some i when port_ok (String.sub hostport (i + 1) (String.length hostport - i - 1))
+      ->
+        Ok ()
+    | _ -> Error "malformed address in connection URI"
+  else
+    match String.split_on_char ':' hostport with
+    | [ _ ] -> Ok ()
+    | [ _; port ] when digits port -> Ok ()
+    | _ -> Error "malformed host or port in connection URI"
+
+let uri s =
+  let* () = well_formed s in
+  let u = Uri.of_string s in
+  (* the library splits values on commas; put them back *)
+  let query = List.map (fun (k, vs) -> (k, String.concat "," vs)) (Uri.query u) in
   let some k v = match v with Some v when v <> "" -> [ (k, v) ] | _ -> [] in
   let path = Uri.pct_decode (Uri.path u) in
   let database =
@@ -86,6 +133,35 @@ let sslmode_of_string = function
   | "verify-full" -> Ok Verify_full
   | other -> Error (Printf.sprintf "unknown sslmode %S" other)
 
+let all_methods = [ Scram_sha_256; Md5; Password; No_authentication ]
+
+(* libpq's require_auth: a comma-separated list of methods, or of negated
+   methods, never a mixture. *)
+let require_auth_of_string s =
+  let name m =
+    match String.trim m with
+    | "scram-sha-256" -> Ok Scram_sha_256
+    | "md5" -> Ok Md5
+    | "password" -> Ok Password
+    | "none" -> Ok No_authentication
+    | other -> Error (Printf.sprintf "unsupported require_auth method %S" other)
+  in
+  let items = List.map String.trim (String.split_on_char ',' s) in
+  let negated m = String.length m > 0 && m.[0] = '!' in
+  let rec names acc = function
+    | [] -> Ok (List.rev acc)
+    | m :: rest ->
+        let m = if negated m then String.sub m 1 (String.length m - 1) else m in
+        let* a = name m in
+        names (a :: acc) rest
+  in
+  if items = [] || List.mem "" items then Error "empty require_auth"
+  else if List.for_all negated items then
+    let* refused = names [] items in
+    Ok (List.filter (fun m -> not (List.mem m refused)) all_methods)
+  else if List.exists negated items then Error "require_auth mixes methods and negations"
+  else names [] items
+
 let known =
   [
     "host";
@@ -95,10 +171,36 @@ let known =
     "dbname";
     "sslmode";
     "sslrootcert";
+    "require_auth";
     "application_name";
     "options";
     "connect_timeout";
   ]
+
+(* Variables libpq would act on and this driver cannot. Ignoring one would
+   quietly weaken or redirect a connection the operator configured through the
+   environment. *)
+let unsupported_environment () =
+  let set k = match Sys.getenv_opt k with Some v when v <> "" -> Some v | _ -> None in
+  let refuse k = Option.map (fun _ -> k) (set k) in
+  let unless k accepted =
+    match set k with Some v when not (List.mem v accepted) -> Some k | _ -> None
+  in
+  List.find_map Fun.id
+    [
+      refuse "PGHOSTADDR";
+      refuse "PGSERVICE";
+      refuse "PGSERVICEFILE";
+      refuse "PGSSLCERT";
+      refuse "PGSSLKEY";
+      refuse "PGPASSFILE";
+      refuse "PGKRBSRVNAME";
+      refuse "PGGSSLIB";
+      unless "PGCHANNELBINDING" [ "disable" ];
+      unless "PGSSLNEGOTIATION" [ "postgres" ];
+      unless "PGTARGETSESSIONATTRS" [ "any" ];
+      unless "PGGSSENCMODE" [ "disable" ];
+    ]
 
 let parse s =
   let* pairs =
@@ -108,14 +210,23 @@ let parse s =
     then uri s
     else keywords s
   in
-  match List.find_opt (fun (k, _) -> not (List.mem k known)) pairs with
-  | Some (k, _) -> Error (Printf.sprintf "unsupported connection parameter %S" k)
-  | None ->
+  let keys = List.map fst pairs in
+  match
+    ( List.find_opt (fun k -> not (List.mem k known)) keys,
+      List.find_opt (fun k -> List.length (List.filter (( = ) k) keys) > 1) keys,
+      unsupported_environment () )
+  with
+  | Some k, _, _ -> Error (Printf.sprintf "unsupported connection parameter %S" k)
+  | None, Some k, _ ->
+      Error (Printf.sprintf "connection parameter %S given more than once" k)
+  | None, None, Some k ->
+      Error (Printf.sprintf "unsupported environment variable %s is set" k)
+  | None, None, None ->
       let env k =
         match Sys.getenv_opt k with Some v when v <> "" -> Some v | _ -> None
       in
       let get key var =
-        match List.assoc_opt key (List.rev pairs) with
+        match List.assoc_opt key pairs with
         | Some v when v <> "" -> Some v
         | _ -> Option.bind var env
       in
@@ -124,7 +235,7 @@ let parse s =
         match get "port" (Some "PGPORT") with
         | None -> Ok 5432
         | Some p -> (
-            match int_of_string_opt p with
+            match if digits p then int_of_string_opt p else None with
             | Some n when n > 0 && n < 65536 -> Ok n
             | _ -> Error (Printf.sprintf "invalid port %S" p))
       in
@@ -136,25 +247,66 @@ let parse s =
             | Some u -> Ok u
             | None -> Error "no user in connection string, PGUSER or USER")
       in
-      let* sslmode =
+      let* mode =
         match get "sslmode" (Some "PGSSLMODE") with
         | None -> Ok Prefer
         | Some m -> sslmode_of_string m
       in
+      let* sslmode, sslrootcert =
+        match (mode, get "sslrootcert" (Some "PGSSLROOTCERT")) with
+        | (Disable | Prefer), Some "system" | Disable, Some _ ->
+            Error "sslrootcert needs sslmode=require or stronger"
+        | _, Some "system" -> Ok (Verify_full, None)
+        | Require, (Some _ as root) -> Ok (Verify_ca, root)
+        | Verify_ca, None -> Error "sslmode=verify-ca needs sslrootcert"
+        | mode, root -> Ok (mode, root)
+      in
+      let* require_auth =
+        match get "require_auth" (Some "PGREQUIREAUTH") with
+        | None -> Ok None
+        | Some r -> Result.map Option.some (require_auth_of_string r)
+      in
+      let* connect_timeout =
+        match get "connect_timeout" (Some "PGCONNECT_TIMEOUT") with
+        | None -> Ok None
+        | Some t -> (
+            match if digits t then int_of_string_opt t else None with
+            | Some 0 -> Ok None
+            | Some n -> Ok (Some (float_of_int n))
+            | None -> Error (Printf.sprintf "invalid connect_timeout %S" t))
+      in
+      let info =
+        {
+          host;
+          port;
+          user;
+          password = get "password" (Some "PGPASSWORD");
+          database = Option.value (get "dbname" (Some "PGDATABASE")) ~default:user;
+          sslmode;
+          sslrootcert;
+          require_auth;
+          connect_timeout;
+          application_name = get "application_name" (Some "PGAPPNAME");
+          options = get "options" (Some "PGOPTIONS");
+        }
+      in
+      (* After decoding: a percent-encoded NUL would end a field early on the
+         wire and let the remainder be read as further startup parameters. *)
+      let nul = function Some v -> String.contains v '\000' | None -> false in
       if String.contains host ',' then Error "multiple hosts are not supported"
-      else
-        Ok
-          {
-            host;
-            port;
-            user;
-            password = get "password" (Some "PGPASSWORD");
-            database = Option.value (get "dbname" (Some "PGDATABASE")) ~default:user;
-            sslmode;
-            sslrootcert = get "sslrootcert" (Some "PGSSLROOTCERT");
-            application_name = get "application_name" (Some "PGAPPNAME");
-            options = get "options" (Some "PGOPTIONS");
-          }
+      else if
+        List.exists nul
+          [
+            Some info.host;
+            Some info.user;
+            info.password;
+            Some info.database;
+            info.sslrootcert;
+            info.application_name;
+            info.options;
+          ]
+      then Error "NUL byte in a connection parameter"
+      else Ok info
 
 let of_env () =
   match Sys.getenv_opt "DATABASE_URL" with

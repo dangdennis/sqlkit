@@ -31,10 +31,13 @@ module Raw = struct
     input : Eio.Buf_read.t;
     out : Buffer.t;
     shutdown : unit -> unit;
-    readable : unit -> bool;
+    readable : unit -> [ `Yes | `No | `Unknown ];
     cancel : unit -> unit;
     clock : clock;
     query_timeout : float;
+    max_result_bytes : int;
+    mutable received : int;
+    mutable busy : bool;
     stmts : (string, string) Hashtbl.t;
     mutable counter : int;
     mutable transaction : Wire.transaction;
@@ -66,21 +69,38 @@ module Raw = struct
     | exception End_of_file -> raise (Io "server closed the connection unexpectedly")
     | exception e -> raise (Io (Printexc.to_string e))
 
-  let read flow_input =
+  (* The length is checked before a byte of the payload is asked for, so a
+     server cannot make the client reserve memory by announcing a size. Until
+     the session is established the limit is small: nothing a server
+     legitimately says before then is long. *)
+  let read ?(limit = Wire.max_message) flow_input =
     io (fun () ->
         let tag = Eio.Buf_read.any_char flow_input in
         let len = Int32.to_int (Eio.Buf_read.BE.uint32 flow_input) land 0xFFFFFFFF in
-        if len < 4 || len - 4 > Wire.max_message then
-          raise (Io "server sent a message of impossible length");
+        if len < 4 || len - 4 > limit then
+          raise (Io "server sent a message of unacceptable length");
         match Wire.decode tag (Eio.Buf_read.take (len - 4) flow_input) with
-        | Ok m -> m
+        | Ok m -> (m, len)
         | Error why -> raise (Io why))
 
-  (* Messages the server may send at any time and that carry no reply. *)
+  (* Every message counts against the statement's budget, including the ones
+     that carry no reply: a stream of notices is as good a way to fill memory
+     as a stream of rows. *)
   let rec next c =
-    match read c.input with
+    let m, len = read c.input in
+    c.received <- c.received + len;
+    if c.received > c.max_result_bytes then
+      raise (Io "reply exceeds the configured max_result_bytes");
+    match m with
     | Wire.Notice_response _ | Wire.Parameter_status _ | Wire.Notification -> next c
     | m -> m
+
+  (* Start of a request. Idle and in step, nothing can be waiting to be read;
+     if something is, the replies would be attributed one statement late. *)
+  let begin_request c =
+    if Eio.Buf_read.buffered_bytes c.input > 0 then
+      raise (Io "unexpected data from the server between statements");
+    c.received <- 0
 
   let write c =
     let data = Buffer.contents c.out in
@@ -132,6 +152,7 @@ module Raw = struct
 
   (* Returns the statement's reply and whether a cached plan produced it. *)
   let attempt c ~sql ~args =
+    begin_request c;
     match Hashtbl.find_opt c.stmts sql with
     | Some name ->
         Wire.bind c.out ~statement:name args;
@@ -182,7 +203,14 @@ module Raw = struct
 
   let guard c f =
     if c.closed then Error (Sqlkit.Driver.error "connection discarded")
+    else if c.busy then
+      (* Two fibers on one handle would read each other's replies. *)
+      Error (Sqlkit.Driver.error "connection is in use by another fiber")
     else
+      let f () =
+        c.busy <- true;
+        Fun.protect ~finally:(fun () -> c.busy <- false) f
+      in
       let run () =
         match f () with
         | Ok _ as r -> r
@@ -216,6 +244,10 @@ module Raw = struct
           has_nul sql
           || Array.exists (function Some s -> has_nul s | None -> false) args
         then Error (client_diag "SQL or parameter contains a NUL byte")
+        else if
+          Array.length args > Wire.max_parameters
+          || Wire.statement_size ~sql args > Wire.max_frontend_message
+        then Error (client_diag "statement is larger than PostgreSQL accepts")
         else
           match dispatch c ~sql ~args with
           | Rows (rows, affected) -> Ok (rows, affected)
@@ -231,7 +263,15 @@ module Raw = struct
   let copy c ~sql ~rows =
     guard c (fun () ->
         if has_nul sql then Error (client_diag "SQL contains a NUL byte")
+        else if
+          String.length sql > Wire.max_frontend_message - 64
+          || List.exists
+               (fun line ->
+                 String.length line > Wire.max_frontend_message - copy_chunk - 64)
+               rows
+        then Error (client_diag "COPY statement or row is larger than PostgreSQL accepts")
         else begin
+          begin_request c;
           Wire.query c.out sql;
           write c;
           let rec finish ~count ~error =
@@ -284,16 +324,33 @@ module Raw = struct
               | None, None -> raise (Io "COPY finished without a row count"))
         end)
 
-  (* No round trip. Idle and in step, the server has nothing to say, so a
-     readable socket means it closed the connection or sent something we would
-     have to read to understand; either way a fresh connection is cheaper than
-     guessing. A handle returned with a transaction open is not reused. *)
+  (* A Sync on its own is answered with ReadyForQuery and nothing else. *)
+  let ping c =
+    match
+      begin_request c;
+      Wire.sync c.out;
+      write c;
+      collect c
+    with
+    | _, _, _, None -> c.transaction = Wire.Idle
+    | _, _, _, Some _ -> false
+    | exception Io _ -> false
+    | exception e ->
+        close c;
+        raise e
+
+  (* Idle and in step, the server has nothing to say, so a readable socket
+     means it closed the connection or sent something we would have to read to
+     understand; either way a fresh connection is cheaper than guessing. When
+     the socket cannot be examined without a round trip, the round trip is
+     made. A handle returned with a transaction open is not reused. *)
   let healthy c =
-    (not c.closed) && (not c.broken) && c.transaction = Wire.Idle
+    (not c.closed) && (not c.broken) && (not c.busy) && c.transaction = Wire.Idle
     && Eio.Buf_read.buffered_bytes c.input = 0
-    && not (c.readable ())
+    && match c.readable () with `No -> true | `Yes -> false | `Unknown -> ping c
 
   let setup c statements =
+    begin_request c;
     List.iter
       (fun sql ->
         Wire.parse c.out ~name:"" ~sql;
@@ -332,6 +389,8 @@ let authenticator (info : Conninfo.t) =
   | Disable | Prefer | Require -> Ok lenient
   | Verify_full -> trusted ()
   | Verify_ca ->
+      (* Conninfo guarantees a root file here: checking a chain against every
+         public authority while ignoring the name would accept anybody. *)
       Result.map
         (fun (verify : X509.Authenticator.t) ?ip:_ ~host:_ chain ->
           verify ?ip:None ~host:None chain)
@@ -339,25 +398,32 @@ let authenticator (info : Conninfo.t) =
 
 let secure (info : Conninfo.t) socket =
   Lazy.force rng;
-  match authenticator info with
-  | Error (`Msg why) -> Error ("TLS: " ^ why)
-  | Ok authenticator -> (
-      let ip = Result.to_option (Ipaddr.of_string info.host) in
-      let host =
-        match ip with
-        | Some _ -> None
-        | None ->
-            Result.to_option
-              (Result.bind (Domain_name.of_string info.host) Domain_name.host)
-      in
-      match Tls.Config.client ~authenticator ?ip () with
-      | Error (`Msg why) -> Error ("TLS: " ^ why)
-      | Ok config -> Ok (Tls_eio.client_of_flow config ?host socket :> flow))
+  let ip = Result.to_option (Ipaddr.of_string info.host) in
+  let host =
+    match ip with
+    | Some _ -> None
+    | None ->
+        Result.to_option (Result.bind (Domain_name.of_string info.host) Domain_name.host)
+  in
+  if info.sslmode = Verify_full && ip = None && host = None then
+    (* Without a name to compare, only the chain would be checked, which is
+       not what verify-full promises. *)
+    Error
+      (Printf.sprintf
+         "TLS: %S cannot be verified against a certificate (not a host name or address)"
+         info.host)
+  else
+    match authenticator info with
+    | Error (`Msg why) -> Error ("TLS: " ^ why)
+    | Ok authenticator -> (
+        match Tls.Config.client ~authenticator ?ip () with
+        | Error (`Msg why) -> Error ("TLS: " ^ why)
+        | Ok config -> Ok ((Tls_eio.client_of_flow config ?host socket :> flow), true))
 
 (* SSLRequest is answered with a single byte, read before any buffering so that
    the TLS handshake sees the stream from its first byte. *)
 let negotiate (info : Conninfo.t) ~unix socket =
-  let plain = (socket :> flow) in
+  let plain = ((socket :> flow), false) in
   if unix || info.sslmode = Disable then Ok plain
   else begin
     Eio.Flow.copy_string Wire.ssl_request socket;
@@ -370,60 +436,94 @@ let negotiate (info : Conninfo.t) ~unix socket =
     | _ -> Error "unexpected reply to the TLS request"
   end
 
-let authenticate (info : Conninfo.t) flow input =
+(* The server proposes the method; the client decides whether to go along.
+   Each connection gets one exchange, in one method, and a method is used only
+   if the policy allows it. Otherwise whoever answers for the server could ask
+   for the password in clear after, or instead of, the SCRAM exchange that was
+   meant to keep it from them.
+
+   Without [require_auth], everything is allowed except sending the password
+   itself over a connection that is neither encrypted nor a local socket.
+   AuthenticationOk with no exchange at all is allowed too, as in libpq: that
+   is trust authentication, and it means the server has proved nothing. *)
+let authenticate (info : Conninfo.t) ~confidential flow input =
   let send message = Eio.Flow.copy_string message flow in
+  let allowed (m : Conninfo.auth) =
+    match info.require_auth with
+    | Some methods -> List.mem m methods
+    | None -> ( match m with Password -> confidential | _ -> true)
+  in
+  let refused what =
+    Error
+      (Printf.sprintf "the server asked for %s, which this connection does not allow" what)
+  in
   let need_password k =
     match info.password with
     | Some p -> k p
     | None -> Error "the server asked for a password and none was given"
   in
-  let rec go scram =
-    match Raw.read input with
+  let rec go stage =
+    match fst (Raw.read ~limit:Wire.max_startup_message input) with
     | Wire.Authentication Auth_ok -> (
-        (* Once SCRAM has started, only a verified server signature may end
-           it: a server that skips its final message has not shown that it
-           knows the password. *)
-        match scram with
-        | `None | `Verified -> Ok ()
+        match stage with
+        | `Start ->
+            if allowed No_authentication then Ok () else refused "no authentication"
+        | `Verified | `Answered -> Ok ()
         | `Sent _ | `Proving _ -> Error "the server ended SCRAM without proving itself")
-    | Wire.Authentication Cleartext ->
-        need_password (fun p ->
-            send (Wire.password p);
-            go scram)
-    | Wire.Authentication (Md5 salt) ->
-        need_password (fun p ->
-            send (Wire.password (Scram.md5 ~user:info.user ~password:p ~salt));
-            go scram)
-    | Wire.Authentication (Sasl mechanisms) ->
-        if not (List.mem Scram.mechanism mechanisms) then
-          Error "the server offers no supported SASL mechanism"
-        else
-          need_password (fun _ ->
-              Lazy.force rng;
-              let nonce = Base64.encode_string (Mirage_crypto_rng.generate 18) in
-              send
-                (Wire.sasl_initial ~mechanism:Scram.mechanism (Scram.client_first ~nonce));
-              go (`Sent nonce))
+    | Wire.Authentication Cleartext -> (
+        match stage with
+        | `Start when allowed Password ->
+            need_password (fun p ->
+                send (Wire.password p);
+                go `Answered)
+        | `Start -> refused "the password in clear"
+        | _ -> Error "the server asked to authenticate twice")
+    | Wire.Authentication (Md5 salt) -> (
+        match stage with
+        | `Start when allowed Md5 ->
+            need_password (fun p ->
+                send (Wire.password (Scram.md5 ~user:info.user ~password:p ~salt));
+                go `Answered)
+        | `Start -> refused "an MD5 password"
+        | _ -> Error "the server asked to authenticate twice")
+    | Wire.Authentication (Sasl mechanisms) -> (
+        match stage with
+        | `Start when not (allowed Scram_sha_256) -> refused "SCRAM-SHA-256"
+        | `Start when not (List.mem Scram.mechanism mechanisms) ->
+            Error "the server offers no supported SASL mechanism"
+        | `Start ->
+            need_password (fun _ ->
+                Lazy.force rng;
+                let nonce = Base64.encode_string (Mirage_crypto_rng.generate 18) in
+                send
+                  (Wire.sasl_initial ~mechanism:Scram.mechanism
+                     (Scram.client_first ~nonce));
+                go (`Sent nonce))
+        | _ -> Error "the server asked to authenticate twice")
     | Wire.Authentication (Sasl_continue server_first) -> (
-        match (scram, info.password) with
+        match (stage, info.password) with
         | `Sent nonce, Some password -> (
-            match Scram.client_final ~password ~nonce ~server_first with
+            (* The derivation yields as it goes, so the connect deadline can
+               end it and other fibers keep running. *)
+            match
+              Scram.client_final ~pause:Eio.Fiber.yield ~password ~nonce ~server_first ()
+            with
             | Error _ as e -> e
             | Ok (message, expected) ->
                 send (Wire.sasl_response message);
                 go (`Proving expected))
         | _ -> Error "unexpected SASL challenge")
     | Wire.Authentication (Sasl_final server_final) -> (
-        match scram with
+        match stage with
         | `Proving expected when Scram.verify expected ~server_final -> go `Verified
         | _ -> Error "the server failed to prove it knows the password")
     | Wire.Authentication (Unsupported code) ->
         Error (Printf.sprintf "unsupported authentication method (code %d)" code)
     | Wire.Error_response f -> Error (f.severity ^ ":  " ^ f.message)
-    | Wire.Notice_response _ | Wire.Negotiate_protocol_version -> go scram
+    | Wire.Notice_response _ | Wire.Negotiate_protocol_version -> go stage
     | _ -> Error "unexpected message during authentication"
   in
-  go `None
+  go `Start
 
 let startup_parameters (info : Conninfo.t) =
   [ ("user", info.user); ("database", info.database); ("client_encoding", "UTF8") ]
@@ -441,36 +541,44 @@ let addresses ~net (info : Conninfo.t) =
       (Eio.Net.getaddrinfo_stream ~service:(string_of_int info.port) net info.host)
 
 (* The cancel request travels on its own short-lived connection, as the
-   protocol requires, and never over TLS state shared with the main one. It is
-   bounded: a server that has gone away must not hold up the caller. *)
-let cancel_request ~net ~clock addr ~pid ~key () =
+   protocol requires, protected the same way as the main one: the key it
+   carries is what lets someone stop this session's statements. It is bounded:
+   a server that has gone away must not hold up the caller. *)
+let cancel_request ~net ~clock (info : Conninfo.t) ~unix addr ~pid ~key () =
   match
     Eio.Time.Timeout.run (Eio.Time.Timeout.seconds clock 2.) (fun () ->
         Eio.Switch.run (fun sw ->
             let socket = Eio.Net.connect ~sw net addr in
-            Eio.Flow.copy_string (Wire.cancel_request ~pid ~key) socket;
-            (* the server closes once it has acted on the request *)
-            let sink = Cstruct.create 1 in
-            (try ignore (Eio.Flow.single_read socket sink : int) with End_of_file -> ());
-            Ok ()))
+            match negotiate info ~unix socket with
+            | Error _ -> Ok ()
+            | Ok (flow, _) ->
+                Eio.Flow.copy_string (Wire.cancel_request ~pid ~key) flow;
+                (* the server closes once it has acted on the request *)
+                let sink = Cstruct.create 1 in
+                (try ignore (Eio.Flow.single_read flow sink : int)
+                 with End_of_file -> ());
+                Ok ()))
   with
   | Ok () | Error `Timeout -> ()
   | exception ((Out_of_memory | Stack_overflow | Sys.Break) as e) -> raise e
   | exception _ -> ()
 
+(* select cannot look at descriptors past its set size; then the answer is
+   unknown, not "nothing there". *)
 let readable socket () =
   match Eio_unix.Resource.fd_opt socket with
-  | None -> false
+  | None -> `Unknown
   | Some fd ->
       Eio_unix.Fd.use fd
-        ~if_closed:(fun () -> true)
+        ~if_closed:(fun () -> `Yes)
         (fun fd ->
           match Unix.select [ fd ] [] [] 0. with
-          | [], _, _ -> false
-          | _ -> true
-          | exception Unix.Unix_error _ -> false)
+          | [], _, _ -> `No
+          | _ -> `Yes
+          | exception Unix.Unix_error _ -> `Unknown)
 
-let establish ~sw ~net ~clock ~query_timeout ~statements (info : Conninfo.t) =
+let establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statements
+    (info : Conninfo.t) =
   let attempt (addr, unix) =
     let socket = Eio.Net.connect ~sw net addr in
     let ready = ref false in
@@ -483,12 +591,12 @@ let establish ~sw ~net ~clock ~query_timeout ~statements (info : Conninfo.t) =
         let ( let* ) = Result.bind in
         match
           Raw.io (fun () ->
-              let* flow = negotiate info ~unix socket in
+              let* flow, encrypted = negotiate info ~unix socket in
               let input = Eio.Buf_read.of_flow ~max_size:(Wire.max_message + 5) flow in
               Eio.Flow.copy_string (Wire.startup (startup_parameters info)) flow;
-              let* () = authenticate info flow input in
+              let* () = authenticate info ~confidential:(encrypted || unix) flow input in
               let rec greet key =
-                match Raw.read input with
+                match fst (Raw.read ~limit:Wire.max_startup_message input) with
                 | Wire.Backend_key_data { pid; key } -> greet (Some (pid, key))
                 | Wire.Ready_for_query _ -> Ok key
                 | Wire.Error_response f -> Error (f.severity ^ ":  " ^ f.message)
@@ -497,7 +605,7 @@ let establish ~sw ~net ~clock ~query_timeout ~statements (info : Conninfo.t) =
               let* key = greet None in
               let cancel =
                 match key with
-                | Some (pid, key) -> cancel_request ~net ~clock addr ~pid ~key
+                | Some (pid, key) -> cancel_request ~net ~clock info ~unix addr ~pid ~key
                 | None -> ignore
               in
               let c =
@@ -510,6 +618,9 @@ let establish ~sw ~net ~clock ~query_timeout ~statements (info : Conninfo.t) =
                   cancel;
                   clock;
                   query_timeout;
+                  max_result_bytes;
+                  received = 0;
+                  busy = false;
                   stmts = Hashtbl.create 16;
                   counter = 0;
                   transaction = Wire.Idle;
@@ -544,8 +655,9 @@ let establish ~sw ~net ~clock ~query_timeout ~statements (info : Conninfo.t) =
 
 let conninfo_of_env = Conninfo.of_env
 let boundary = Sqlkit_pool_eio.boundary
+let default_max_result_bytes = 256 * 1024 * 1024
 
-let validate ~limits ~connect_timeout ~query_timeout conninfo =
+let validate ~limits ~connect_timeout ~query_timeout ~max_result_bytes conninfo =
   let invalid message =
     Error (Sqlkit.Error.Invalid_argument { operation = "connect"; message })
   in
@@ -558,16 +670,26 @@ let validate ~limits ~connect_timeout ~query_timeout conninfo =
              (fun n -> Float.is_finite n && n > 0.)
              [ connect_timeout; query_timeout ])
       then invalid "client timeouts must be finite and positive"
+      else if max_result_bytes < 1 then invalid "max_result_bytes must be positive"
       else if String.contains conninfo '\000' then invalid "NUL in connection string"
       else
         match Conninfo.parse conninfo with Ok info -> Ok info | Error why -> invalid why)
 
-let open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout info =
+(* A connect_timeout in the connection string can shorten the deadline, never
+   extend it past what the caller asked for. *)
+let open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout ~max_result_bytes
+    (info : Conninfo.t) =
+  let connect_timeout =
+    match info.connect_timeout with
+    | Some seconds -> Float.min seconds connect_timeout
+    | None -> connect_timeout
+  in
   boundary ~operation:"connect" (fun () ->
       let statements = Sqlkit.Driver.session_setup @ Sqlkit.Limits.statements limits in
       match
         Eio.Time.Timeout.run (Eio.Time.Timeout.seconds clock connect_timeout) (fun () ->
-            Ok (establish ~sw ~net ~clock ~query_timeout ~statements info))
+            Ok
+              (establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statements info))
       with
       | Ok r -> r
       | Error `Timeout ->
@@ -576,9 +698,12 @@ let open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout info =
                { operation = "connect"; phase = Connect; seconds = connect_timeout }))
 
 let connect ~sw ~net ~clock ?(limits = Sqlkit.Limits.default) ?(connect_timeout = 10.)
-    ?(query_timeout = 35.) ?observe conninfo =
+    ?(query_timeout = 35.) ?(max_result_bytes = default_max_result_bytes) ?observe
+    conninfo =
   let clock = (clock :> clock) in
-  Result.bind (validate ~limits ~connect_timeout ~query_timeout conninfo) (fun info ->
+  Result.bind
+    (validate ~limits ~connect_timeout ~query_timeout ~max_result_bytes conninfo)
+    (fun info ->
       Result.map
         (fun c ->
           let conn = Sqlkit.Driver.make ?observe (module Raw) c in
@@ -586,16 +711,21 @@ let connect ~sw ~net ~clock ?(limits = Sqlkit.Limits.default) ?(connect_timeout 
               Raw.close c;
               Sqlkit.Driver.release conn);
           conn)
-        (open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout info))
+        (open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout
+           ~max_result_bytes info))
 
 module Pool = struct
   include Sqlkit_pool_eio.Make (Raw) (Raw)
 
   let create ~sw ~net ~clock ?(max_size = 10) ?(acquire_timeout = 5.)
-      ?(connect_timeout = 10.) ?(query_timeout = 35.) ?(limits = Sqlkit.Limits.default)
+      ?(connect_timeout = 10.) ?(query_timeout = 35.)
+      ?(max_result_bytes = default_max_result_bytes) ?(limits = Sqlkit.Limits.default)
       ?(observe = Sqlkit.Telemetry.ignore) conninfo =
     let mono = (clock :> clock) in
-    Result.bind (validate ~limits ~connect_timeout ~query_timeout conninfo) (fun info ->
+    Result.bind
+      (validate ~limits ~connect_timeout ~query_timeout ~max_result_bytes conninfo)
+      (fun info ->
         create ~sw ~clock ~max_size ~acquire_timeout ~observe (fun () ->
-            open_raw ~sw ~net ~clock:mono ~limits ~connect_timeout ~query_timeout info))
+            open_raw ~sw ~net ~clock:mono ~limits ~connect_timeout ~query_timeout
+              ~max_result_bytes info))
 end

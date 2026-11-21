@@ -16,6 +16,7 @@
   sqlkit_caqti
   sqlkit_eio
   sqlkit_pgwire
+  cstruct
   unix
   generated
   ptime
