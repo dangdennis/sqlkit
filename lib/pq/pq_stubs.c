@@ -415,12 +415,6 @@ CAMLprim value sqlkit_pq_conn_is_null(value conn)
   return Val_bool(Nativeint_val(conn) == 0);
 }
 
-/* 150004 for 15.4; 0 when the connection is not established. */
-CAMLprim value sqlkit_pq_server_version(value conn)
-{
-  return Val_int(PQserverVersion(Conn_val(conn)));
-}
-
 CAMLprim value sqlkit_pq_connect_poll(value conn)
 {
   return Val_int((int)PQconnectPoll(Conn_val(conn)));

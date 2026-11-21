@@ -421,7 +421,6 @@ module Raw = struct
             in
             match
               poll Eio_unix.await_writable;
-              Option.iter (fun message -> raise (Io message)) (Pq.unsupported_server raw);
               if not (A.set_nonblocking raw) then fail c "could not set nonblocking mode";
               if not (A.enter_pipeline raw) then fail c "could not enter pipeline mode";
               setup c statements

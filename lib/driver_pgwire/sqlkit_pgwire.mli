@@ -4,7 +4,8 @@
     the cancel request and the TLS handshake all run as fibers, and a result is decoded
     straight from the socket buffer.
 
-    Requires PostgreSQL 15 or later; an older server is refused when connecting.
+    Supports PostgreSQL 15 and later. Older servers are not refused, but nothing is tested
+    against them.
 
     Supported: TCP and Unix-domain sockets; trust, password, MD5 and SCRAM-SHA-256
     authentication (without channel binding); TLS through [sslmode] [prefer], [require],

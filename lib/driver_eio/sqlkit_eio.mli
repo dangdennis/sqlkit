@@ -23,7 +23,8 @@
     Sqlkit_eio.Pool.use pool (fun conn -> Db.get_user conn ~id)
     ]}
 
-    Requires PostgreSQL 15 or later; an older server is refused when connecting.
+    Supports PostgreSQL 15 and later. Older servers are not refused, but nothing is tested
+    against them.
 
     Behind PgBouncer in transaction mode without prepared-statement support, pass
     [~statement_cache:false]; see [Sqlkit_pgwire] for what each pooling mode needs.

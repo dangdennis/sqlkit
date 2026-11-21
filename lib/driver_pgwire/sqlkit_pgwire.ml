@@ -570,26 +570,6 @@ let authenticate (info : Conninfo.t) ~confidential flow input =
   in
   go `Start
 
-(* PostgreSQL 15 is the oldest version this project supports. The server
-   states its version while the session starts, so an older one is refused
-   here, by name, instead of failing later on whatever it handles differently.
-   The string is "15.4", "18beta1", "16.2 (Debian ...)" and the like. *)
-let minimum_server = 15
-
-let supported_server version =
-  let digits =
-    String.to_seq version
-    |> Seq.take_while (function '0' .. '9' -> true | _ -> false)
-    |> String.of_seq
-  in
-  match int_of_string_opt digits with
-  | Some major -> major >= minimum_server
-  | None -> false
-
-let unsupported_server version =
-  Printf.sprintf "PostgreSQL %d or later is required; the server is %s" minimum_server
-    version
-
 let startup_parameters (info : Conninfo.t) =
   [ ("user", info.user); ("database", info.database); ("client_encoding", "UTF8") ]
   @ (match info.application_name with
@@ -660,19 +640,14 @@ let establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statement_cache
               let input = Eio.Buf_read.of_flow ~max_size:(Wire.max_message + 5) flow in
               Eio.Flow.copy_string (Wire.startup (startup_parameters info)) flow;
               let* () = authenticate info ~confidential:(encrypted || unix) flow input in
-              let rec greet key version =
+              let rec greet key =
                 match fst (Raw.read ~limit:Wire.max_startup_message input) with
-                | Wire.Backend_key_data { pid; key } -> greet (Some (pid, key)) version
-                | Wire.Parameter_status ("server_version", v) -> greet key (Some v)
-                | Wire.Ready_for_query _ -> (
-                    match version with
-                    | Some v when supported_server v -> Ok key
-                    | Some v -> Error (unsupported_server v)
-                    | None -> Error "the server did not report its version")
+                | Wire.Backend_key_data { pid; key } -> greet (Some (pid, key))
+                | Wire.Ready_for_query _ -> Ok key
                 | Wire.Error_response f -> Error (f.severity ^ ":  " ^ f.message)
-                | _ -> greet key version
+                | _ -> greet key
               in
-              let* key = greet None None in
+              let* key = greet None in
               let cancel =
                 match key with
                 | Some (pid, key) -> cancel_request ~net ~clock info ~unix addr ~pid ~key

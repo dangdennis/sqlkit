@@ -130,7 +130,6 @@ let () =
   in
   let auth code rest = message 'R' (int32 code ^ rest) in
   let ready = message 'Z' "I" in
-  let current = message 'S' "server_version\00018.0\000" in
   let read_some flow =
     let buf = Cstruct.create 65536 in
     match Eio.Flow.single_read flow buf with
@@ -179,7 +178,7 @@ let () =
          (fun flow ->
            Eio.Flow.copy_string (auth 3 "") flow;
            seen := read_some flow;
-           Eio.Flow.copy_string (auth 0 "" ^ current ^ ready) flow;
+           Eio.Flow.copy_string (auth 0 "" ^ ready) flow;
            ignore (read_some flow);
            Eio.Flow.copy_string ready flow)
          connect
@@ -200,7 +199,7 @@ let () =
   check "require_auth=scram-sha-256 refuses a server that asks for nothing"
     (connect_refused
        (hostile ~parameters:" require_auth=scram-sha-256"
-          (fun flow -> Eio.Flow.copy_string (auth 0 "" ^ current ^ ready) flow)
+          (fun flow -> Eio.Flow.copy_string (auth 0 "" ^ ready) flow)
           connect));
   let started = Unix.gettimeofday () in
   check "an absurd SCRAM cost is refused, not computed"
@@ -223,18 +222,6 @@ let () =
             ignore (read_some flow))
           connect)
     && Unix.gettimeofday () -. started < 2.);
-  let status k v = message 'S' (k ^ "\000" ^ v ^ "\000") in
-  check "a server older than PostgreSQL 15 is refused by name"
-    (match
-       hostile
-         (fun flow ->
-           Eio.Flow.copy_string (auth 0 "" ^ status "server_version" "14.19" ^ ready) flow;
-           ignore (read_some flow))
-         connect
-     with
-    | Error (Sqlkit.Error.Connect why) ->
-        why = "PostgreSQL 15 or later is required; the server is 14.19"
-    | _ -> false);
   check "an oversized message before authentication is refused"
     (connect_refused
        (hostile
@@ -246,7 +233,7 @@ let () =
     (match
        hostile
          (fun flow ->
-           Eio.Flow.copy_string (auth 0 "" ^ current ^ ready) flow;
+           Eio.Flow.copy_string (auth 0 "" ^ ready) flow;
            ignore (read_some flow);
            Eio.Flow.copy_string ready flow;
            ignore (read_some flow);
@@ -267,7 +254,7 @@ let () =
     (match
        hostile
          (fun flow ->
-           Eio.Flow.copy_string (auth 0 "" ^ current ^ ready) flow;
+           Eio.Flow.copy_string (auth 0 "" ^ ready) flow;
            ignore (read_some flow);
            Eio.Flow.copy_string (ready ^ ready) flow;
            ignore (read_some flow))

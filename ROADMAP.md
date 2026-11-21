@@ -273,9 +273,10 @@ Production testing (2026-11-21), each runnable from `example/`:
   shared backend can never hand one client another's rows;
   `~statement_cache:false` is the mode for poolers without support.
 - Compatibility: PostgreSQL 15 to 18, Unix sockets, Linux with the posix and
-  io_uring backends. PostgreSQL 15 is the minimum: the libpq, Eio and pgwire
-  drivers refuse an older server when connecting (13 and 14 are out of
-  upstream support and read interval literals differently).
+  io_uring backends. PostgreSQL 15 is the oldest supported version. Older
+  servers are not refused, but nothing is tested against them; 13 and 14 are
+  out of upstream support and reject interval literals whose time part is
+  longer than about 35 minutes.
 
 Still open:
 

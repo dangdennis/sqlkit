@@ -140,10 +140,6 @@ let open_raw ~limits ~connect_timeout conninfo =
         let message = String.trim (Pq.error_message c) in
         Pq.finish c;
         Error (Sqlkit.Error.Connect message))
-      else if Pq.unsupported_server c <> None then (
-        let message = Option.get (Pq.unsupported_server c) in
-        Pq.finish c;
-        Error (Sqlkit.Error.Connect message))
       else
         let rec setup = function
           | [] ->
