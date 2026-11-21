@@ -260,6 +260,23 @@ the whole e2e suite, `example/eio_checks.ml` and `example/soak.exe`;
 verification) and `test/test_pgwire.ml` (message layout, SCRAM, a decoder that
 never raises).
 
+Production testing (2026-11-21), each runnable from `example/`:
+
+- `chaos.exe`: a proxy that fragments, delays, cuts, stalls, corrupts and
+  injects into the stream. No escaped exception, no operation past its
+  deadline, no wrong answer reported as success (over TLS, even under
+  tampering), no leaked descriptors or backends.
+- `differential.exe`: the same statements through `sqlkit-pgwire` and libpq,
+  comparing rows, counts and every error field.
+- `pooler_checks.exe`: PgBouncer in transaction mode with and without
+  prepared-statement support. Statement names are a digest of the SQL, so a
+  shared backend can never hand one client another's rows;
+  `~statement_cache:false` is the mode for poolers without support.
+- Compatibility: PostgreSQL 15 to 18, Unix sockets, Linux with the posix and
+  io_uring backends. PostgreSQL 15 is the minimum: the libpq, Eio and pgwire
+  drivers refuse an older server when connecting (13 and 14 are out of
+  upstream support and read interval literals differently).
+
 Still open:
 
 - Binary result format, in both drivers and the runtime's decoders.

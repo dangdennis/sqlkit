@@ -191,6 +191,18 @@ let conninfo_of_env () =
         | Some p when p <> "" -> " password=" ^ p
         | _ -> "")
 
+external server_version : conn -> int = "sqlkit_pq_server_version"
+
+let minimum_server = 15
+
+let unsupported_server conn =
+  let v = server_version conn in
+  if v >= minimum_server * 10000 then None
+  else
+    Some
+      (Printf.sprintf "PostgreSQL %d or later is required; the server is %d.%d"
+         minimum_server (v / 10000) (v mod 10000))
+
 external fmod : res -> int -> int = "sqlkit_pq_fmod"
 external monotonic_time : unit -> float = "sqlkit_monotonic_time"
 external connect_timeout : string -> int -> conn = "sqlkit_pq_connect_timeout"
@@ -222,7 +234,7 @@ module Async = struct
   external get_result_raw : conn -> res = "sqlkit_pq_get_result_nb"
   external put_copy_data_raw : conn -> string -> int = "sqlkit_pq_put_copy_data_nb"
   external put_copy_end_raw : conn -> int = "sqlkit_pq_put_copy_end_nb"
-  external cancel : conn -> bool = "sqlkit_pq_cancel_detached"
+  external cancel : conn -> Unix.file_descr -> bool = "sqlkit_pq_cancel_detached"
 
   let connect_start conninfo =
     let c = connect_start_raw conninfo in

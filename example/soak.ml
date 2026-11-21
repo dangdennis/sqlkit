@@ -31,9 +31,18 @@ let () =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let clock = env#mono_clock and net = env#net in
+  (* Works for a URI with or without a query, and for key=value. Behind
+     PgBouncer the options parameter needs ignore_startup_parameters. *)
   let conninfo =
-    Sqlkit_eio.conninfo_of_env () ^ "?application_name=" ^ tag
-    ^ "&options=-c%20client_min_messages%3Dwarning"
+    let base = Sqlkit_eio.conninfo_of_env () in
+    if String.starts_with ~prefix:"postgres" base && String.contains base ':' then
+      Printf.sprintf
+        "%s%sapplication_name=%s&options=-c%%20client_min_messages%%3Dwarning" base
+        (if String.contains base '?' then "&" else "?")
+        tag
+    else
+      Printf.sprintf "%s application_name=%s options='-c client_min_messages=warning'"
+        base tag
   in
   let limits = { Sqlkit.Limits.default with statement_timeout_ms = 2000 } in
   let { use }, admin =

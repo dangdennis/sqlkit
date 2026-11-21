@@ -23,6 +23,11 @@
     Sqlkit_eio.Pool.use pool (fun conn -> Db.get_user conn ~id)
     ]}
 
+    Requires PostgreSQL 15 or later; an older server is refused when connecting.
+
+    Behind PgBouncer in transaction mode without prepared-statement support, pass
+    [~statement_cache:false]; see [Sqlkit_pgwire] for what each pooling mode needs.
+
     Connection strings are libpq's: a [postgresql://] URI or [key=value] pairs. Host names
     are resolved by libpq with a blocking lookup, which holds the domain for its duration;
     use an address where that matters. *)
@@ -37,6 +42,7 @@ val connect :
   ?limits:Sqlkit.Limits.t ->
   ?connect_timeout:float ->
   ?query_timeout:float ->
+  ?statement_cache:bool ->
   ?observe:Sqlkit.Telemetry.observer ->
   string ->
   (Sqlkit.conn, Sqlkit.Error.t) result
@@ -62,6 +68,7 @@ module Pool : sig
     ?acquire_timeout:float ->
     ?connect_timeout:float ->
     ?query_timeout:float ->
+    ?statement_cache:bool ->
     ?limits:Sqlkit.Limits.t ->
     ?observe:Sqlkit.Telemetry.observer ->
     string ->

@@ -389,6 +389,7 @@ CAMLprim value sqlkit_pq_connect_timeout(value conninfo, value seconds) {
  * blocking getaddrinfo. That limitation is libpq's. */
 
 #include <pthread.h>
+#include <unistd.h>
 
 _Static_assert(PGRES_COPY_IN == 4, "ExecStatusType changed");
 _Static_assert(PGRES_PIPELINE_SYNC == 10, "ExecStatusType changed");
@@ -412,6 +413,12 @@ CAMLprim value sqlkit_pq_connect_start(value conninfo)
 CAMLprim value sqlkit_pq_conn_is_null(value conn)
 {
   return Val_bool(Nativeint_val(conn) == 0);
+}
+
+/* 150004 for 15.4; 0 when the connection is not established. */
+CAMLprim value sqlkit_pq_server_version(value conn)
+{
+  return Val_int(PQserverVersion(Conn_val(conn)));
 }
 
 CAMLprim value sqlkit_pq_connect_poll(value conn)
@@ -537,27 +544,44 @@ CAMLprim value sqlkit_pq_put_copy_end_nb(value conn)
  * the address, backend pid and key, not the PGconn), so the request runs on a
  * detached thread that never touches the OCaml runtime, and the caller is free
  * to PQfinish the connection immediately. Best effort: the result is dropped. */
+struct cancel_job {
+  PGcancel *cancel;
+  int report;
+};
+
 static void *cancel_thread(void *arg)
 {
-  PGcancel *cancel = (PGcancel *)arg;
+  struct cancel_job *job = (struct cancel_job *)arg;
   char errbuf[256];
-  PQcancel(cancel, errbuf, sizeof(errbuf));
-  PQfreeCancel(cancel);
+  PQcancel(job->cancel, errbuf, sizeof(errbuf));
+  PQfreeCancel(job->cancel);
+  /* Tell whoever is waiting that the request is out, then let go of the pipe. */
+  (void)!write(job->report, "x", 1);
+  close(job->report);
+  free(job);
   return NULL;
 }
 
-CAMLprim value sqlkit_pq_cancel_detached(value conn)
+CAMLprim value sqlkit_pq_cancel_detached(value conn, value report)
 {
   PGcancel *cancel = PQgetCancel(Conn_val(conn));
   if (cancel == NULL) return Val_false;
+  struct cancel_job *job = malloc(sizeof(struct cancel_job));
+  if (job == NULL) {
+    PQfreeCancel(cancel);
+    return Val_false;
+  }
+  job->cancel = cancel;
+  job->report = Int_val(report);
   pthread_t thread;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-  int rc = pthread_create(&thread, &attr, cancel_thread, cancel);
+  int rc = pthread_create(&thread, &attr, cancel_thread, job);
   pthread_attr_destroy(&attr);
   if (rc != 0) {
     PQfreeCancel(cancel);
+    free(job);
     return Val_false;
   }
   return Val_true;

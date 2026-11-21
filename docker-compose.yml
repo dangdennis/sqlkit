@@ -74,5 +74,40 @@ services:
       timeout: 3s
       retries: 30
 
+  # PgBouncer in front of the main server, for example/pooler_checks.ml. Both in
+  # transaction mode, which is where a driver that prepares statements can go
+  # wrong: one without prepared-statement support (56432) and one with (56433).
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    container_name: sqlkit-pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &bouncer
+      DB_HOST: postgres
+      DB_USER: sqlkit
+      DB_PASSWORD: sqlkit
+      DB_NAME: sqlkit
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: 4
+      MAX_CLIENT_CONN: 200
+      MAX_PREPARED_STATEMENTS: 0
+      IGNORE_STARTUP_PARAMETERS: options
+    ports:
+      - "56432:5432"
+
+  pgbouncer-prepared:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    container_name: sqlkit-pgbouncer-prepared
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *bouncer
+      MAX_PREPARED_STATEMENTS: 200
+    ports:
+      - "56433:5432"
+
 volumes:
   pgdata:

@@ -78,6 +78,12 @@ val copy_from : conn -> sql:string -> rows:string list -> (int, diag) result
     the connection stays usable even when the server aborts mid-stream. Returns rows
     written. *)
 
+val server_version : conn -> int
+(** libpq's encoding: 150004 for 15.4. *)
+
+val unsupported_server : conn -> string option
+(** A message when the connected server is older than the project supports (15). *)
+
 val fmod : res -> int -> int
 val monotonic_time : unit -> float
 val connect_timeout : string -> int -> conn
@@ -142,7 +148,9 @@ module Async : sig
   val status : res -> status
   (** [Finished] covers success and failure alike; pass the result to {!check}. *)
 
-  val cancel : conn -> bool
-  (** Ask the server to stop the running command, without waiting for the answer. Safe to
-      [finish] the connection straight afterwards. Best effort. *)
+  val cancel : conn -> Unix.file_descr -> bool
+  (** Ask the server to stop the running command, on a thread of its own. When the request
+      has been delivered (or has failed) the thread writes one byte to the descriptor and
+      closes it. [false] means no thread was started and the descriptor is still the
+      caller's. Safe to [finish] the connection at any point. Best effort. *)
 end

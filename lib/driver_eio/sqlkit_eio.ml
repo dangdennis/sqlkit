@@ -34,7 +34,8 @@ module Raw = struct
     clock : clock;
     query_timeout : float;
     stmts : (string, string) Hashtbl.t;
-    mutable counter : int;
+    statement_cache : bool;
+    mutable generation : int;
     mutable closed : bool;
   }
 
@@ -153,23 +154,42 @@ module Raw = struct
 
   let confused c = fail c "unexpected reply to a pipelined statement"
 
+  (* Named after a digest of the SQL, for the reason given in sqlkit-pgwire:
+     behind a pooler in transaction mode a counter would let one client run
+     another's statement. *)
+  let statement_name c sql =
+    Printf.sprintf "sqlkit_%s%s"
+      (Digest.to_hex (Digest.string sql))
+      (if c.generation = 0 then "" else "_" ^ string_of_int c.generation)
+
   (* Returns the statement's reply and whether a cached plan produced it. *)
-  let attempt c ~sql ~args =
-    match Hashtbl.find_opt c.stmts sql with
-    | Some name -> (
-        sent c (A.send_query_prepared c.raw name args);
-        match sync c with [ r ] -> (r, true) | _ -> confused c)
-    | None -> (
-        c.counter <- c.counter + 1;
-        let name = Printf.sprintf "sqlkit_s%d" c.counter in
-        sent c (A.send_prepare c.raw name sql);
-        sent c (A.send_query_prepared c.raw name args);
-        match sync c with
-        | [ Rows _; r ] ->
-            Hashtbl.replace c.stmts sql name;
-            (r, false)
-        | (Refused _ as r) :: _ -> (r, false)
-        | _ -> confused c)
+  let rec attempt c ~sql ~args =
+    if not c.statement_cache then begin
+      sent c (A.send_query_params c.raw sql args);
+      match sync c with [ r ] -> (r, false) | _ -> confused c
+    end
+    else
+      match Hashtbl.find_opt c.stmts sql with
+      | Some name -> (
+          sent c (A.send_query_prepared c.raw name args);
+          match sync c with [ r ] -> (r, true) | _ -> confused c)
+      | None -> (
+          let name = statement_name c sql in
+          sent c (A.send_prepare c.raw name sql);
+          sent c (A.send_query_prepared c.raw name args);
+          match sync c with
+          | [ Rows _; r ] ->
+              Hashtbl.replace c.stmts sql name;
+              (r, false)
+          | (Refused { Pq.sqlstate = Some "42P05"; _ } as exists) :: _ -> (
+              (* Already prepared on this backend by an earlier client of a
+                 pooler; the name says it is the same statement. *)
+              Hashtbl.replace c.stmts sql name;
+              match attempt c ~sql ~args with
+              | Refused { Pq.sqlstate = Some "25P02"; _ }, _ -> (exists, false)
+              | answer -> answer)
+          | (Refused _ as r) :: _ -> (r, false)
+          | _ -> confused c)
 
   (* A cached statement can go stale: dropped by DEALLOCATE or DISCARD ALL
      (26000), or its result type changed under it (0A000). Forget it and run
@@ -179,13 +199,38 @@ module Raw = struct
      the retry necessary there: ROLLBACK and COMMIT are still accepted, and a
      transaction must not be left open because its ROLLBACK was cached. *)
   let dispatch c ~sql ~args =
-    match attempt c ~sql ~args with
-    | (Refused { Pq.sqlstate = Some ("26000" | "0A000"); _ } as stale), true -> (
-        Hashtbl.remove c.stmts sql;
-        match attempt c ~sql ~args with
-        | Refused { Pq.sqlstate = Some "25P02"; _ }, _ -> stale
-        | r, _ -> r)
-    | r, _ -> r
+    (* Behind a pooler without prepared-statement support each attempt can
+       land on a different backend, one that lacks the statement or already
+       has it, so one retry is not always enough. The bound keeps a server
+       that always answers "stale" from holding the caller forever. *)
+    let rec go ~first ~tries =
+      match attempt c ~sql ~args with
+      | (Refused { Pq.sqlstate = Some (("26000" | "0A000") as code); _ } as stale), true
+        when tries > 0 ->
+          Hashtbl.remove c.stmts sql;
+          if code = "0A000" then c.generation <- c.generation + 1;
+          go ~first:(Some (Option.value first ~default:stale)) ~tries:(tries - 1)
+      | Refused { Pq.sqlstate = Some "25P02"; _ }, _ when first <> None ->
+          Option.get first
+      | r, _ -> r
+    in
+    go ~first:None ~tries:4
+
+  (* Ask the server to stop, and give the request a moment to arrive before
+     the connection is closed. A pooler in front of the server drops a cancel
+     whose client has already gone, which would leave the statement running,
+     and holding its locks, with nobody waiting for it. libpq's request blocks,
+     so it runs on its own thread and reports back through a pipe. *)
+  let cancel c =
+    let finished, report = Unix.pipe ~cloexec:true () in
+    if A.cancel c.raw report then
+      ignore
+        (Eio.Time.Timeout.run (Eio.Time.Timeout.seconds c.clock 2.) (fun () ->
+             Eio_unix.await_readable finished;
+             Ok ())
+          : (unit, [ `Timeout ]) result)
+    else Unix.close report;
+    Unix.close finished
 
   let fatal c (d : Pq.diag) =
     (not (Pq.connect_ok c.raw))
@@ -220,7 +265,7 @@ module Raw = struct
             close c;
             Error (Sqlkit.Driver.error message)
         | exception e ->
-            ignore (A.cancel c.raw : bool);
+            Eio.Cancel.protect (fun () -> cancel c);
             close c;
             raise e
       in
@@ -345,7 +390,7 @@ module Raw = struct
     List.iter (fun sql -> sent c (A.send_query_params c.raw sql [||])) statements;
     List.find_map (function Refused d -> Some d | Rows _ | Skipped -> None) (sync c)
 
-  let establish ~clock ~query_timeout ~statements conninfo =
+  let establish ~clock ~query_timeout ~statement_cache ~statements conninfo =
     match A.connect_start conninfo with
     | None -> Error (Sqlkit.Error.Connect "libpq could not allocate a connection")
     | Some raw ->
@@ -355,7 +400,8 @@ module Raw = struct
             clock;
             query_timeout;
             stmts = Hashtbl.create 16;
-            counter = 0;
+            statement_cache;
+            generation = 0;
             closed = false;
           }
         in
@@ -375,6 +421,7 @@ module Raw = struct
             in
             match
               poll Eio_unix.await_writable;
+              Option.iter (fun message -> raise (Io message)) (Pq.unsupported_server raw);
               if not (A.set_nonblocking raw) then fail c "could not set nonblocking mode";
               if not (A.enter_pipeline raw) then fail c "could not enter pipeline mode";
               setup c statements
@@ -411,12 +458,12 @@ let validate ~limits ~connect_timeout ~query_timeout conninfo =
                message = "client timeouts must be finite and positive";
              })
 
-let open_raw ~clock ~limits ~connect_timeout ~query_timeout conninfo =
+let open_raw ~clock ~limits ~connect_timeout ~query_timeout ~statement_cache conninfo =
   boundary ~operation:"connect" (fun () ->
       let statements = Sqlkit.Driver.session_setup @ Sqlkit.Limits.statements limits in
       match
         Eio.Time.Timeout.run (Eio.Time.Timeout.seconds clock connect_timeout) (fun () ->
-            Ok (Raw.establish ~clock ~query_timeout ~statements conninfo))
+            Ok (Raw.establish ~clock ~query_timeout ~statement_cache ~statements conninfo))
       with
       | Ok r -> r
       | Error `Timeout ->
@@ -425,7 +472,7 @@ let open_raw ~clock ~limits ~connect_timeout ~query_timeout conninfo =
                { operation = "connect"; phase = Connect; seconds = connect_timeout }))
 
 let connect ~sw ~clock ?(limits = Sqlkit.Limits.default) ?(connect_timeout = 10.)
-    ?(query_timeout = 35.) ?observe conninfo =
+    ?(query_timeout = 35.) ?(statement_cache = true) ?observe conninfo =
   let clock = (clock :> clock) in
   Result.bind (validate ~limits ~connect_timeout ~query_timeout conninfo) (fun () ->
       Result.map
@@ -435,16 +482,17 @@ let connect ~sw ~clock ?(limits = Sqlkit.Limits.default) ?(connect_timeout = 10.
               Raw.close c;
               Sqlkit.Driver.release conn);
           conn)
-        (open_raw ~clock ~limits ~connect_timeout ~query_timeout conninfo))
+        (open_raw ~clock ~limits ~connect_timeout ~query_timeout ~statement_cache conninfo))
 
 module Pool = struct
   include Sqlkit_pool_eio.Make (Raw) (Raw)
 
   let create ~sw ~clock ?(max_size = 10) ?(acquire_timeout = 5.) ?(connect_timeout = 10.)
-      ?(query_timeout = 35.) ?(limits = Sqlkit.Limits.default)
+      ?(query_timeout = 35.) ?(statement_cache = true) ?(limits = Sqlkit.Limits.default)
       ?(observe = Sqlkit.Telemetry.ignore) conninfo =
     let mono = (clock :> clock) in
     Result.bind (validate ~limits ~connect_timeout ~query_timeout conninfo) (fun () ->
         create ~sw ~clock ~max_size ~acquire_timeout ~observe (fun () ->
-            open_raw ~clock:mono ~limits ~connect_timeout ~query_timeout conninfo))
+            open_raw ~clock:mono ~limits ~connect_timeout ~query_timeout ~statement_cache
+              conninfo))
 end
