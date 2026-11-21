@@ -20,3 +20,7 @@ VALUES (:id, :payload?, :other?, :payloads, :matrix, :positives, :spans, :words)
 
 -- name: BinaryContainers :one!
 SELECT :bytes::bytea AS bytes, :items::bytea[] AS items;
+
+-- name: OptionalBounds :one
+SELECT 1::int AS "value!"
+WHERE true /*? AND :lo::int <= :hi::int */;

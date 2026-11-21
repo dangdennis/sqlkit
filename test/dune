@@ -5,13 +5,14 @@
 
 (tests
  (names
-  test_sqlml
+  test_sqlkit
   test_sqlstate
   test_interval
   test_value_row
-  test_containers)
- (package sqlml)
- (libraries sqlml ptime))
+  test_containers
+  test_result_contract)
+ (package sqlkit)
+ (libraries sqlkit ptime))
 
 (tests
  (names
@@ -22,10 +23,15 @@
   test_run
   test_resolve_render
   test_snapshot)
- (package sqlml-postgresql)
+ (package sqlkit-postgresql)
  (deps render_golden.ml.expected render_golden.mli.expected)
- (libraries sqlml_gen unix))
+ (libraries sqlkit_gen unix))
+
+(tests
+ (names test_generated test_structured_errors)
+ (libraries sqlkit generated ptime uuidm decimal yojson))
 
 (test
- (name test_generated)
- (libraries sqlml generated ptime uuidm decimal yojson))
+ (name test_pgwire)
+ (package sqlkit-pgwire)
+ (libraries pgwire_protocol sqlkit))

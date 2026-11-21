@@ -1,7 +1,7 @@
-(* sqlml CLI. *)
+(* sqlkit CLI. *)
 
 open Cmdliner
-open Sqlml_gen
+open Sqlkit_gen
 
 (* Stamped by dune at build time from the project version (or the release
    watermark), so there is no string to forget to bump. *)
@@ -35,15 +35,15 @@ let conninfo_of = function Some u -> u | None -> Describe.conninfo_of_env ()
 
 let offline =
   let doc =
-    "Use the committed sqlml.snapshot.json instead of a live database. Create or refresh \
-     it with $(b,sqlml snapshot)."
+    "Use the committed sqlkit.snapshot.json instead of a live database. Create or \
+     refresh it with $(b,sqlkit snapshot)."
   in
   Arg.(value & flag & info [ "offline" ] ~doc)
 
 let die fmt =
   Printf.ksprintf
     (fun s ->
-      prerr_endline ("sqlml: " ^ s);
+      prerr_endline ("sqlkit: " ^ s);
       exit 1)
     fmt
 
@@ -92,8 +92,8 @@ let check queries_dir out_dir module_name database offline =
       Printf.printf "up to date (%d queries from %d file(s))\n" b.Run.queries b.Run.files;
       exit 0
   | Ok drifts ->
-      List.iter (fun d -> prerr_endline ("sqlml: " ^ Run.string_of_drift d)) drifts;
-      prerr_endline "sqlml: run `sqlml generate` to update";
+      List.iter (fun d -> prerr_endline ("sqlkit: " ^ Run.string_of_drift d)) drifts;
+      prerr_endline "sqlkit: run `sqlkit generate` to update";
       exit 1
 
 let check_cmd =
@@ -147,12 +147,12 @@ let snapshot_cmd =
     [
       `S Manpage.s_description;
       `P
-        "Describes every query against a live database and writes sqlml.snapshot.json \
+        "Describes every query against a live database and writes sqlkit.snapshot.json \
          beside the queries. Commit it; $(b,generate --offline) and $(b,check --offline) \
          then need no database.";
       `P
         "Each entry is keyed on a hash of every SQL variant the query can execute, and \
-         the schema files listed in sqlml.toml ($(b,schema = [...])) are hashed as a \
+         the schema files listed in sqlkit.toml ($(b,schema = [...])) are hashed as a \
          whole, so editing a query or a listed schema file makes --offline fail loudly \
          instead of serving stale types. Schema changes outside the listed files are \
          invisible offline: keep a live $(b,check) in CI as the backstop.";
@@ -168,17 +168,17 @@ let main =
     [
       `S Manpage.s_description;
       `P
-        "You write .sql files with sqlc-style annotations; sqlml asks PostgreSQL what \
+        "You write .sql files with sqlc-style annotations; sqlkit asks PostgreSQL what \
          the types are and emits typed OCaml.";
       `S Manpage.s_examples;
-      `Pre "  sqlml generate -q src/sql -o src/db";
-      `Pre "  sqlml check    -q src/sql -o src/db";
+      `Pre "  sqlkit generate -q src/sql -o src/db";
+      `Pre "  sqlkit check    -q src/sql -o src/db";
       `S Manpage.s_environment;
       `P "DATABASE_URL, or PGHOST / PGPORT / PGUSER / PGDATABASE / PGPASSWORD.";
     ]
   in
   Cmd.group
-    (Cmd.info "sqlml" ~version ~doc ~man)
+    (Cmd.info "sqlkit" ~version ~doc ~man)
     [ generate_cmd; check_cmd; describe_cmd; snapshot_cmd ]
 
 let () = exit (Cmd.eval main)

@@ -8,7 +8,7 @@ let check what b =
     Printf.printf "FAIL %s\n" what;
     exit 1)
 
-open Sqlml_gen
+open Sqlkit_gen
 
 let t ?custom ?elem ?(labels = []) ?(nullable = false) name =
   let pg = Pg_type.legacy ~name ~element:elem ~labels in
@@ -23,8 +23,8 @@ let () =
   check "jsonb -> Yojson"
     (Option.map Typemap.ocaml_type (t "jsonb") = Some "Yojson.Safe.t");
   check "date -> Ptime.date" (Option.map Typemap.ocaml_type (t "date") = Some "Ptime.date");
-  check "interval -> Sqlml.Interval.t"
-    (Option.map Typemap.ocaml_type (t "interval") = Some "Sqlml.Interval.t");
+  check "interval -> Sqlkit.Interval.t"
+    (Option.map Typemap.ocaml_type (t "interval") = Some "Sqlkit.Interval.t");
   check "timetz stays string" (Option.map Typemap.ocaml_type (t "timetz") = Some "string");
 
   (* the hard-error invariant: unmapped is None, never a silent string *)
@@ -36,14 +36,14 @@ let () =
     (Option.map Typemap.ocaml_type (t "text" ~nullable:true) = Some "string option");
   check "array of uuid"
     (Option.map Typemap.ocaml_type (t "_uuid" ~elem:"uuid")
-    = Some "(Uuidm.t) Sqlml.Pg_array.t");
+    = Some "(Uuidm.t) Sqlkit.Pg_array.t");
   check "nullable array"
     (Option.map Typemap.ocaml_type (t "_int4" ~elem:"int4" ~nullable:true)
-    = Some "(int) Sqlml.Pg_array.t option");
+    = Some "(int) Sqlkit.Pg_array.t option");
   check "array of enum decodes via _of_string"
     (Option.map Typemap.decoder (t "_status" ~elem:"status" ~labels:[ "a"; "b" ])
     = Some
-        "(Sqlml.Row.custom (Sqlml.Pg_array.of_string ~delimiter:',' \
+        "(Sqlkit.Row.custom (Sqlkit.Pg_array.of_string ~delimiter:',' \
          public_status_of_string))");
 
   (* enums *)
@@ -69,10 +69,10 @@ let () =
     = Some "Email.t");
   check "custom decoder splices of_string"
     (Option.map Typemap.decoder (t "citext" ~custom:c)
-    = Some "(Sqlml.Row.custom Email.of_string)");
+    = Some "(Sqlkit.Row.custom Email.of_string)");
   check "custom encoder goes through to_string"
     (Option.map Typemap.encoder (t "citext" ~custom:c)
-    = Some "(fun x -> Sqlml.Value.of_string (Email.to_string x))");
+    = Some "(fun x -> Result.map Sqlkit.Value.of_string (Email.to_string x))");
 
   (* constructor naming *)
   check "label to constructor" (Typemap.constructor_of_label "in-progress" = "In_progress");

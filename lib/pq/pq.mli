@@ -39,8 +39,8 @@ val conninfo_of_env : unit -> string
 val prepare : conn -> string -> string -> res
 val describe_prepared : conn -> string -> res
 val exec : conn -> string -> res
-val exec_params : conn -> string -> string option array -> res
-val exec_prepared : conn -> string -> string option array -> res
+val exec_params : conn -> string -> string option array -> (res, diag) result
+val exec_prepared : conn -> string -> string option array -> (res, diag) result
 
 (** {1 Results} *)
 
@@ -79,3 +79,70 @@ val copy_from : conn -> sql:string -> rows:string list -> (int, diag) result
     written. *)
 
 val fmod : res -> int -> int
+val monotonic_time : unit -> float
+val connect_timeout : string -> int -> conn
+val cmd_tuples_text : res -> string
+
+(** {1 Asynchronous API}
+
+    For a driver that waits on the socket itself. No function here blocks on the server:
+    each one queues bytes, moves bytes the socket already has, or reads libpq's state. The
+    caller waits on {!Async.socket} between calls. The exception is
+    {!Async.connect_start}, where libpq resolves host names with a blocking lookup.
+
+    One connection belongs to one fiber at a time. *)
+module Async : sig
+  val connect_start : string -> conn option
+  (** [None] only when libpq could not allocate. A returned connection may already have
+      failed; check {!connect_ok} or poll it. It must be [finish]ed either way. *)
+
+  type polling = Polling_failed | Polling_reading | Polling_writing | Polling_ok
+
+  val connect_poll : conn -> polling
+
+  val socket : conn -> Unix.file_descr option
+  (** The descriptor can change while connecting; ask again after each poll. *)
+
+  val set_nonblocking : conn -> bool
+  val enter_pipeline : conn -> bool
+  val exit_pipeline : conn -> bool
+  val pipeline_sync : conn -> bool
+
+  val transaction_idle : conn -> bool
+  (** No transaction open and no command in progress. *)
+
+  val send_query : conn -> string -> bool
+  (** Simple protocol; not available in pipeline mode. Needed for COPY. *)
+
+  val send_prepare : conn -> string -> string -> bool
+
+  val send_query_params : conn -> string -> string option array -> bool
+  (** Text parameters; [None] is NULL. The caller must reject NUL bytes first, in the SQL
+      and in every parameter: libpq would truncate there. *)
+
+  val send_query_prepared : conn -> string -> string option array -> bool
+
+  type progress = Done | Again | Failed
+
+  val flush : conn -> progress
+  (** [Again]: wait until the socket is readable or writable, consume input if readable,
+      and call again. *)
+
+  val consume_input : conn -> bool
+  val is_busy : conn -> bool
+
+  val get_result : conn -> res option
+  (** Call only when {!is_busy} is false. The result must be [clear]ed. *)
+
+  val put_copy_data : conn -> string -> progress
+  val put_copy_end : conn -> progress
+
+  type status = Finished | Copy_in | Pipeline_sync | Pipeline_aborted
+
+  val status : res -> status
+  (** [Finished] covers success and failure alike; pass the result to {!check}. *)
+
+  val cancel : conn -> bool
+  (** Ask the server to stop the running command, without waiting for the answer. Safe to
+      [finish] the connection straight afterwards. Best effort. *)
+end

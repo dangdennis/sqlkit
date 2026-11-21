@@ -45,7 +45,7 @@ let resolve_column cfg (q : Parse.t) (c : Describe.column) =
   if not (Gen_util.is_lower_ident fname) then
     Diag.error ~file:q.Parse.file ~line:q.Parse.line ~query:q.Parse.name
       "column %S is not usable as an OCaml field name%s; alias it in the SELECT list (AS \
-       some_name) or rename it in sqlml.toml"
+       some_name) or rename it in sqlkit.toml"
       fname
       (if List.mem fname Gen_util.ocaml_keywords then " (OCaml keyword)" else "")
   else
@@ -57,7 +57,7 @@ let resolve_column cfg (q : Parse.t) (c : Describe.column) =
     | Some t -> Ok { fname; ftype = t; ord = c.Describe.table_col }
     | None ->
         Diag.error ~file:q.Parse.file ~line:q.Parse.line ~query:q.Parse.name
-          "column %S has Postgres type %S, which sqlml has no mapping for (anonymous \
+          "column %S has Postgres type %S, which sqlkit has no mapping for (anonymous \
            records must be cast to a named composite)"
           c.Describe.name
           (Pg_type.qualified c.Describe.pg_type.id)
@@ -88,7 +88,7 @@ let resolve_param cfg (q : Parse.t) (p : Describe.param) =
       Ok { fname = p.Describe.pname; ftype = t; ord = 0 }
   | None ->
       Diag.error ~file:q.Parse.file ~line:q.Parse.line ~query:q.Parse.name
-        "parameter %S has Postgres type %S, which sqlml has no mapping for"
+        "parameter %S has Postgres type %S, which sqlkit has no mapping for"
         p.Describe.pname
         (Pg_type.qualified p.Describe.pg_type.id)
 
@@ -296,11 +296,11 @@ let collect_enums resolved =
   match (!bad_name, !conflict) with
   | Some (n, q), _ ->
       Diag.error ~file:q.Parse.file ~line:q.Parse.line ~query:q.Parse.name
-        "enum type %S is not usable as an OCaml type name; rename it in sqlml.toml" n
+        "enum type %S is not usable as an OCaml type name; rename it in sqlkit.toml" n
   | _, Some (n, q) ->
       Diag.error ~file:q.Parse.file ~line:q.Parse.line ~query:q.Parse.name
         "two different enums named %S (schema-scoped typnames?) reach this module with \
-         different labels; qualify or rename one in sqlml.toml"
+         different labels; qualify or rename one in sqlkit.toml"
         n
   | None, None ->
       Ok (Hashtbl.fold (fun k v acc -> (k, v) :: acc) tbl [] |> List.sort compare)

@@ -16,7 +16,7 @@ apart:
 | `40001` | serialization_failure | retry the transaction |
 | `40P01` | deadlock_detected | retry the transaction |
 | `57014` | query_canceled | timeout |
-| `08006` | connection_failure | reconnect, retry |
+| `08006` | connection_failure | reconnect; resolve an uncertain commit before retrying |
 
 A web application has to make these distinctions, and matching on the message
 text is fragile and locale-dependent.
@@ -38,14 +38,14 @@ type t =
   | ...
 
 val is_unique_violation : t -> bool
-val is_retryable : t -> bool          (* 40001, 40P01, and connection loss *)
+val is_retryable : t -> bool          (* 40001 and 40P01; no failed cleanup *)
 val constraint_violated : t -> string option
 ```
 
 `constraint_name` is what turns "something was already taken" into "email was
 already taken" without parsing prose.
 
-Shipped. `Sqlml.Sqlstate` covers all 262 codes across 43 classes, generated from
+Shipped. `Sqlkit.Sqlstate` covers all 262 codes across 43 classes, generated from
 `errcodes.txt` in the PostgreSQL source. libpq supplies every diagnostic field;
 Caqti supplies the code and message only, which is all it exposes.
 
@@ -71,7 +71,7 @@ How the neighbours handle it:
   across two queries returning the same table.
 
 We chose sharing deliberately, so we inherit sqlc's problem and take its
-escape hatch: a `sqlml.toml` beside the queries directory.
+escape hatch: a `sqlkit.toml` beside the queries directory.
 
 ```toml
 [rename]
@@ -199,7 +199,27 @@ silently lose COPY's all-or-nothing semantics.
 
 ## 9. Stabilize 0.1 APIs, then exercise a real application — next
 
-Review runtime container constructors, generated naming/configuration, snapshot
+The failure-contract pass is implemented: result-based codecs and generated contracts,
+explicit `_exn` adapters, optional parsing adapters, typed argument/encoding/callback
+errors, and cancellation-aware transaction cleanup. Cancellation propagation by
+exception is accepted. Public structured codec errors with optional detailed
+inspection are implemented: typed reasons and nested paths survive generated
+encoding, decoding, runtime wrappers, and cleanup. Schema-qualified default names (including
+`public`), explicit renames, and rejection of collisions are accepted; unrelated
+additions must not rename existing declarations under the same naming rules.
+Breaking changes remain allowed before 1.0.0, including within 0.1.x, with release
+notes and migration guidance. The 0.1 review does not establish a compatibility
+freeze; remaining API choices still need review.
+
+Interval constructor review is complete: private readable record, validated
+result/option/exception constructors, exact parsing, finite PostgreSQL bounds,
+and real-backend coverage of all four interval output styles.
+
+Range constructor review is complete: public bounds preserve caller input;
+PostgreSQL validates ordering and canonicalizes ranges and multiranges using
+subtype rules. Local construction does not guarantee server acceptance.
+
+Review remaining runtime container constructors, generated naming/configuration, snapshot
 compatibility, and error contracts after the compiler gates pass. Then build a
 nontrivial application covering transactions, concurrency, search, and nested
 PostgreSQL types. The example data-layer programs are not that application, and
@@ -211,3 +231,45 @@ this compiler work does not declare the APIs stable or publish a release.
   strategy, and its flexible typing makes the guarantee weaker anyway.
 - Migrations. A separate concern with good existing tools.
 - A query DSL. The premise of this project is that SQL is the source of truth.
+
+## Production use in owned applications
+
+Implemented: rollback error preservation and connection disposal; real affected
+counts with explicit unknown counts; scoped pooled handles; bounded Eio pool
+acquisition/connect/query operations; configurable server limits; query, transaction,
+pool-wait, and cleanup telemetry without parameters. Real-backend tests exercise
+termination, cancellation, pool exhaustion, timeout recovery, lock contention, and
+connection replacement. Blocking libpq has no client query deadline.
+
+## Eio drivers without Caqti — first pass done
+
+Two drivers implement `Driver.S` on Eio and share one pool (`lib/pool_eio`):
+
+- `sqlkit-eio` (`lib/driver_eio`): libpq's asynchronous API, fibers waiting on
+  the socket. libpq keeps the protocol, authentication and TLS.
+- `sqlkit-pgwire` (`lib/driver_pgwire`): the wire protocol in OCaml, no libpq.
+  TCP and Unix sockets; trust, password, MD5 and SCRAM-SHA-256; TLS with
+  `sslmode` up to `verify-full`; name resolution and the cancel request run as
+  fibers.
+
+Both keep every diagnostic field, real affected counts and COPY, send a
+first-use prepare in the same write as its execution, and ask the server to
+stop a statement whose fiber is cancelled or whose deadline passes. Both pass
+the whole e2e suite, `example/eio_checks.ml` and `example/soak.exe`;
+`sqlkit-pgwire` also passes `example/pgwire_checks.ml` (TLS, MD5, certificate
+verification) and `test/test_pgwire.ml` (message layout, SCRAM, a decoder that
+never raises).
+
+Still open:
+
+- Binary result format, in both drivers and the runtime's decoders.
+- A batch API that exposes pipelining to callers.
+- `sqlkit-pgwire`: SCRAM channel binding, SASLprep for non-ASCII passwords,
+  client certificates, `.pgpass`, several hosts, GSSAPI. Each is refused
+  loudly today. An independent review of the authentication code.
+- `sqlkit-pgwire`: move the generator onto it (RowDescription carries the table
+  and column identifiers it needs), which would remove libpq from the project.
+- `sqlkit-eio`: a nonblocking cancel request once libpq 17 is the floor (today
+  it runs on a detached thread); its host lookup blocks.
+- Longer soaks, and the same checks against a managed server and a pooler.
+- Retire `sqlkit-caqti` once an application has run on one of these.

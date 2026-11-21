@@ -9,7 +9,7 @@ let check what b =
     Printf.printf "FAIL %s\n" what;
     exit 1)
 
-open Sqlml_gen
+open Sqlkit_gen
 
 let contains hay needle =
   let nh = String.length hay and nn = String.length needle in
@@ -157,7 +157,7 @@ let () =
           check "copy_sql is built from the verified columns"
             (contains ml "COPY t (a, b) FROM STDIN");
           check "copy wrapper takes a row list" (contains mli "params list");
-          check "copy module satisfies COPY" (contains mli "Sqlml.Query.COPY")));
+          check "copy module satisfies COPY" (contains mli "Sqlkit.Query.COPY")));
   (match resolve (copy_q "-- name: BulkAdd :copy\nUPDATE t SET a = :a WHERE b = :b") with
   | Error d -> check "non-INSERT copy rejected" (contains (Diag.to_string d) "INSERT")
   | Ok _ -> check "non-INSERT copy rejected" false);

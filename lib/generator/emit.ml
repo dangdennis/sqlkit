@@ -81,4 +81,4 @@ let generate ?(config = Config.empty) ~src (described : Describe.described list)
   let all_names = List.map fst enums @ List.map fst composites @ List.map fst rows in
   if List.length all_names <> List.length (List.sort_uniq String.compare all_names) then
     Diag.error "generated enum, composite, or row names collide; add a rename"
-  else Ok (Render.source ~src ~enums ~composites ~rows resolved)
+  else Render.source ~src ~enums ~composites ~rows resolved

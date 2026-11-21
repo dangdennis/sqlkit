@@ -1,4 +1,4 @@
-(* sqlml.toml parsing: renames, custom-type lookup precedence, and the error
+(* sqlkit.toml parsing: renames, custom-type lookup precedence, and the error
    paths. Uses a temp directory since Config reads a file. *)
 
 let check what b =
@@ -7,24 +7,24 @@ let check what b =
     Printf.printf "FAIL %s\n" what;
     exit 1)
 
-open Sqlml_gen
+open Sqlkit_gen
 
 let with_toml contents f =
-  let dir = Filename.temp_file "sqlml_cfg" "" in
+  let dir = Filename.temp_file "sqlkit_cfg" "" in
   Sys.remove dir;
   Unix.mkdir dir 0o755;
-  let oc = open_out (Filename.concat dir "sqlml.toml") in
+  let oc = open_out (Filename.concat dir "sqlkit.toml") in
   output_string oc contents;
   close_out oc;
   Fun.protect
     ~finally:(fun () ->
-      Sys.remove (Filename.concat dir "sqlml.toml");
+      Sys.remove (Filename.concat dir "sqlkit.toml");
       Unix.rmdir dir)
     (fun () -> f (Config.load dir))
 
 let () =
   (* missing file is empty config *)
-  let dir = Filename.temp_file "sqlml_nocfg" "" in
+  let dir = Filename.temp_file "sqlkit_nocfg" "" in
   Sys.remove dir;
   Unix.mkdir dir 0o755;
   check "missing file is Ok empty"

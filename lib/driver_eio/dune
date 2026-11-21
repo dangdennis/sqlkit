@@ -1,0 +1,4 @@
+(library
+ (name sqlkit_eio)
+ (public_name sqlkit-eio)
+ (libraries sqlkit sqlkit_pool_eio pq eio eio.unix))

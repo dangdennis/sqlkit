@@ -20,7 +20,7 @@ try:
 except KeyError:
     p.error("verified binary currently available for macOS arm64 and Linux x64")
 a.directory.mkdir(parents=True, exist_ok=True)
-with tempfile.TemporaryDirectory(prefix="sqlml-pgn-") as tmp:
+with tempfile.TemporaryDirectory(prefix="sqlkit-pgn-") as tmp:
     archive = Path(tmp) / "pgn.tar.gz"
     subprocess.run(["curl", "--fail", "--location", "--silent", "--show-error", "--max-time", "120",
                     f"https://github.com/pgenie-io/pgenie/releases/download/v0.15.0/pgn-{target}.tar.gz",

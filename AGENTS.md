@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for AI agents working on sqlml. Humans welcome too.
+Instructions for AI agents working on sqlkit. Humans welcome too.
 
 ## What this is
 
@@ -16,7 +16,7 @@ done and deferred. Read the relevant section before changing a decision.
 
 ```
 docker compose up -d           # PostgreSQL 18 on 127.0.0.1:55432
-export DATABASE_URL=postgresql://sqlml:sqlml@127.0.0.1:55432/sqlml
+export DATABASE_URL=postgresql://sqlkit:sqlkit@127.0.0.1:55432/sqlkit
 ```
 
 Dependencies are managed by dune package management: `dune.lock/` is
@@ -28,7 +28,7 @@ is what CI currently uses.
 
 The generator shells out to `ocamlformat`; make sure one matching
 `.ocamlformat`'s pinned version is on PATH or generated output will not match
-`sqlml check`.
+`sqlkit check`.
 
 Schema is `example/schema.sql`, applied on first container boot. After editing
 it: `docker compose down -v && docker compose up -d`.
@@ -39,14 +39,20 @@ it: `docker compose down -v && docker compose up -d`.
 dune build                     # everything
 dune test                      # unit tests; no database needed
 dune exec example/e2e.exe      # end-to-end against Postgres (libpq driver)
+dune exec example/e2e.exe -- --driver eio      # same suite plus eio_checks, libpq async driver
+dune exec example/e2e.exe -- --driver pgwire   # same again, pure OCaml driver
+dune exec example/soak.exe -- pgwire 60 1      # randomized soak (eio|pgwire, seconds, seed)
+docker compose up -d postgres-tls              # TLS + MD5 server on 55433, for:
+docker exec sqlkit-pg-tls cat /var/lib/sqlkit-tls/ca.pem > /tmp/sqlkit-ca.pem
+dune exec example/pgwire_checks.exe -- /tmp/sqlkit-ca.pem
 dune exec example/web.exe      # pooled Caqti driver, concurrency, streaming
 dune exec bin/main.exe -- generate -q example/sql -o example/generated
 dune exec bin/main.exe -- check -q example/sql -o example/generated
-dune exec bin/main.exe -- check --offline -q example/sql -o example/generated  # via sqlml.snapshot.json
+dune exec bin/main.exe -- check --offline -q example/sql -o example/generated  # via sqlkit.snapshot.json
 dune exec bin/main.exe -- snapshot -q example/sql   # refresh the snapshot after schema/query changes
 dune build @fmt                # must be clean; version-pinned ocamlformat
 dune build @doc
-dune build -p sqlml,sqlml-postgresql,sqlml-caqti @install   # release isolation
+dune build -p sqlkit,sqlkit-postgresql,sqlkit-caqti,sqlkit-pool-eio,sqlkit-eio,sqlkit-pgwire @install   # release isolation
 ```
 
 All of the above must pass before a commit. CI runs the same set.
@@ -55,21 +61,24 @@ All of the above must pass before a commit. CI runs the same set.
 
 | Path | Role |
 |---|---|
-| `lib/sqlml/` | Runtime. Generated code depends on this and nothing else. |
+| `lib/sqlkit/` | Runtime. Generated code depends on this and nothing else. |
 | `lib/pq/` | Raw libpq binding (C stubs), shared by generator and driver. |
 | `lib/driver_pg/` | libpq driver: statement cache, full error diagnostics. |
+| `lib/driver_eio/` | Eio driver on libpq's async API: pooling, pipelined prepare, COPY, cancellation. |
+| `lib/driver_pgwire/` | Pure OCaml Eio driver: wire protocol, SCRAM/MD5, TLS. `protocol/` is the socket-free part. |
+| `lib/pool_eio/` | Pool shared by the two Eio drivers. |
 | `lib/driver_caqti/` | Caqti/Eio driver: pooling. |
 | `lib/generator/` | parse → describe → typemap → resolve → render pipeline; config. |
-| `bin/` | `sqlml` CLI (cmdliner). |
+| `bin/` | `sqlkit` CLI (cmdliner). |
 | `example/` | Schema, queries, generated output, runnable programs, e2e. |
 | `test/` | Unit tests. |
 
 ## Invariants — do not break these
 
-- `lib/sqlml` never depends on Caqti, Eio, or libpq. The driver boundary is
-  `Sqlml.Driver.S`; backends live below it, generated signatures above it.
+- `lib/sqlkit` never depends on Caqti, Eio, or libpq. The driver boundary is
+  `Sqlkit.Driver.S`; backends live below it, generated signatures above it.
 - `example/generated/` is generator output. Never hand-edit; change the
-  generator or the SQL and regenerate. `sqlml check` compares byte-for-byte
+  generator or the SQL and regenerate. `sqlkit check` compares byte-for-byte
   and must exit 0.
 - `generate` and `check` share one pipeline (`Run.build`), including the
   ocamlformat pass over emitted code. Do not fork them.
@@ -82,8 +91,9 @@ All of the above must pass before a commit. CI runs the same set.
 - Unmapped Postgres types are a hard error naming the column — never a silent
   fallback to string.
 - Server failures carry a SQLSTATE through `Driver.error`; `_exn` functions
-  are derived from the `result` ones via `or_raise`, never implemented
-  separately.
+  are derived from the `result` ones via `get_exn`, never implemented
+  separately. Expected failures are result values throughout the implementation;
+  only `_exn` adapters raise deliberately.
 
 ## Adding a type mapping
 

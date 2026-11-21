@@ -1,17 +1,17 @@
-{0 sqlml}
+{0 sqlkit}
 
-Write [.sql] files with sqlc-style annotations; sqlml asks PostgreSQL for the
+Write [.sql] files with sqlc-style annotations; sqlkit asks PostgreSQL for the
 parameter and result types of each query and emits typed OCaml.
 
 {1 Packages}
 
-- [sqlml] — the runtime that generated code depends on. See {!module:Sqlml}.
-- [sqlml-postgresql] — the [sqlml] command and a libpq driver, [Sqlml_pg].
-- [sqlml-caqti] — a Caqti/Eio driver with pooling, [Sqlml_caqti].
+- [sqlkit] — the runtime that generated code depends on. See {!module:Sqlkit}.
+- [sqlkit-postgresql] — the [sqlkit] command and a libpq driver, [Sqlkit_pg].
+- [sqlkit-caqti] — a Caqti/Eio driver with pooling, [Sqlkit_caqti].
 
 {1 Entry points}
 
-- {!module:Sqlml} — [fetch_one], [fetch_all], [exec], [transaction].
-- {!module:Sqlml.Row} — decoders used by generated code.
-- {!module:Sqlml.Value} — encoders used by generated code.
-- {!module:Sqlml.Query} — the shape of a generated query module.
+- {!module:Sqlkit} — [fetch_one], [fetch_all], [exec], [transaction].
+- {!module:Sqlkit.Row} — decoders used by generated code.
+- {!module:Sqlkit.Value} — encoders used by generated code.
+- {!module:Sqlkit.Query} — the shape of a generated query module.

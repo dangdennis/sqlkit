@@ -2,7 +2,7 @@
     splices into generated code. *)
 
 type custom = { c_ocaml : string; c_of_string : string; c_to_string : string }
-(** A user-supplied mapping from [sqlml.toml]. *)
+(** A user-supplied mapping from [sqlkit.toml]. *)
 
 type t =
   | Int
@@ -29,10 +29,10 @@ type t =
 val ocaml_type : t -> string
 
 val decoder : t -> string
-(** A function of type [Sqlml.Row.t -> int -> _]. *)
+(** A function of type [Sqlkit.Row.t -> int -> _]. *)
 
 val encoder : t -> string
-(** A function of type [_ -> Sqlml.Value.t]. *)
+(** A function of type [_ -> Sqlkit.Value.t]. *)
 
 val is_option : t -> bool
 val strip_option : t -> t

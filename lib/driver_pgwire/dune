@@ -1,0 +1,22 @@
+(library
+ (name sqlkit_pgwire)
+ (public_name sqlkit-pgwire)
+ (libraries
+  sqlkit
+  sqlkit_pool_eio
+  pgwire_protocol
+  eio
+  eio.unix
+  unix
+  cstruct
+  mtime
+  tls
+  tls-eio
+  ca-certs
+  x509
+  domain-name
+  ipaddr
+  ptime.clock.os
+  mirage-crypto-rng
+  mirage-crypto-rng.unix
+  base64))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the version-pinned pGenie analysis model with sqlml corpus contracts.
+"""Compare the version-pinned pGenie analysis model with sqlkit corpus contracts.
 
 pGenie runs only in an isolated project and temporary database. Unknown failures,
 timeouts, missing cases, and unexplained differences are fatal.
@@ -83,7 +83,7 @@ def run_batch(pgn, database_url, folder, schema, cases, report, reduce=True):
     (folder / "queries").mkdir()
     (folder / "migrations").mkdir()
     (folder / "project1.pgn.yaml").write_text(
-        "space: sqlml\nname: differential\nversion: 0.1.0\npostgres: 18\nartifacts: {}\n")
+        "space: sqlkit\nname: differential\nversion: 0.1.0\npostgres: 18\nartifacts: {}\n")
     (folder / "migrations" / "1.sql").write_text(schema)
     by_name = {}
     for case in cases:
@@ -122,7 +122,7 @@ def run_batch(pgn, database_url, folder, schema, cases, report, reduce=True):
         for field in query["result"]["rows"]["columns"]:
             if not field["is-nullable"]:
                 report["policy_differences"].append({"case": case["name"], "column": field["pg-name"],
-                    "reason": "sqlml defaults to nullable; pGenie claims non-null"})
+                    "reason": "sqlkit defaults to nullable; pGenie claims non-null"})
     if found != set(by_name):
         raise AssertionError(f"missing pGenie cases: {set(by_name) - found}")
 

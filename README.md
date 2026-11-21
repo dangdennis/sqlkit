@@ -1,8 +1,8 @@
-# sqlml
+# sqlkit
 
 Typed OCaml from your SQL, checked against PostgreSQL.
 
-You write `.sql` files. sqlml asks PostgreSQL for the parameter and result types
+You write `.sql` files. sqlkit asks PostgreSQL for the parameter and result types
 of each query, then emits an OCaml module. No query DSL, no ORM, no hand-written
 codecs.
 
@@ -27,7 +27,7 @@ DELETE FROM users WHERE id = :id;
 ```
 
 ```
-$ sqlml generate -q sql -o lib/db
+$ sqlkit generate -q sql -o lib/db
 wrote lib/db/db.mli and lib/db/db.ml (3 queries from 1 file(s))
 ```
 
@@ -44,8 +44,8 @@ type get_user_row =
   ; created_at : Ptime.t option
   }
 
-val get_user : Sqlml.conn -> id:Uuidm.t -> (get_user_row option, Sqlml.Error.t) result
-val get_user_exn : Sqlml.conn -> id:Uuidm.t -> get_user_row option
+val get_user : Sqlkit.conn -> id:Uuidm.t -> (get_user_row option, Sqlkit.Error.t) result
+val get_user_exn : Sqlkit.conn -> id:Uuidm.t -> get_user_row option
 ```
 
 And using it:
@@ -57,7 +57,7 @@ let () =
   match get_user conn ~id with
   | Ok (Some u) -> print_endline (Option.value u.email ~default:"(no email)")
   | Ok None -> print_endline "not found"
-  | Error e -> prerr_endline (Sqlml.Error.to_string e)
+  | Error e -> prerr_endline (Sqlkit.Error.to_string e)
 ```
 
 Result fields are optional by default: catalog constraints alone cannot prove
@@ -66,11 +66,11 @@ query nullability. Enum values use schema-qualified generated variants.
 ## Install
 
 ```
-opam install sqlml sqlml-postgresql
+opam install sqlkit sqlkit-postgresql
 ```
 
-`sqlml` is the runtime that generated code depends on. `sqlml-postgresql`
-provides the `sqlml` command and a libpq driver. Add `sqlml-caqti` for
+`sqlkit` is the runtime that generated code depends on. `sqlkit-postgresql`
+provides the `sqlkit` command and a libpq driver. Add `sqlkit-caqti` for
 connection pooling.
 
 Requires OCaml 5.5.0 or later, for modular explicits.
@@ -78,10 +78,10 @@ Requires OCaml 5.5.0 or later, for modular explicits.
 ## Commands
 
 ```
-sqlml generate -q sql -o lib/db      write db.ml and db.mli
-sqlml check    -q sql -o lib/db      verify they match the database; exit 1 if not
-sqlml describe -q sql                print what PostgreSQL says about each query
-sqlml snapshot -q sql                cache the database's answers for --offline
+sqlkit generate -q sql -o lib/db      write db.ml and db.mli
+sqlkit check    -q sql -o lib/db      verify they match the database; exit 1 if not
+sqlkit describe -q sql                print what PostgreSQL says about each query
+sqlkit snapshot -q sql                cache the database's answers for --offline
 ```
 
 Connection comes from `DATABASE_URL`, or `PGHOST`/`PGPORT`/`PGUSER`/
@@ -99,20 +99,20 @@ it and only fails at runtime; `check` is what catches that.
 (rule
  (alias runtest)
  (deps (glob_files_rec sql/*.sql) db.ml db.mli)
- (action (run sqlml check -q sql -o . -m db)))
+ (action (run sqlkit check -q sql -o . -m db)))
 ```
 
 ### Offline mode
 
-`sqlml snapshot` describes every query against a live database and writes
-`sqlml.snapshot.json` beside the queries. Commit it; `generate --offline` and
+`sqlkit snapshot` describes every query against a live database and writes
+`sqlkit.snapshot.json` beside the queries. Commit it; `generate --offline` and
 `check --offline` then need no database at all.
 
 Staleness is loud, never silent: each entry is keyed on a hash of every SQL
-variant the query can execute, and the schema files listed in `sqlml.toml`
+variant the query can execute, and the schema files listed in `sqlkit.toml`
 (`schema = ["../schema.sql"]`) are hashed as a whole, so editing a query or a
 listed schema file makes `--offline` fail with the query's name and "re-run
-`sqlml snapshot`". The one blind spot is schema drift *outside* the listed
+`sqlkit snapshot`". The one blind spot is schema drift *outside* the listed
 files — a migration applied to the database but never written down. Offline
 mode cannot see that by construction; keep one live `check` in CI as the
 backstop.
@@ -124,7 +124,7 @@ backstop.
 | `-- name: GetUser :one` | at most one row; returns `option` |
 | `-- name: GetUser :one!` | exactly one row; returned unwrapped, absence is an error |
 | `-- name: ListUsers :many` | zero or more rows; returns `list` |
-| `-- name: DeleteUser :exec` | no rows; returns the affected count |
+| `-- name: DeleteUser :exec` | no rows; returns `Some affected_count`, or `None` when unavailable |
 | `-- name: BulkAddUsers :copy` | bulk insert via `COPY FROM STDIN`; takes a row list |
 | `:id` | named parameter, becomes a labelled argument |
 | `:name?` | nullable parameter, becomes an optional argument |
@@ -161,14 +161,14 @@ Parameter nullability remains controlled by the placeholder syntax.
 | `timestamp`, `timestamptz` | `Ptime.t` |
 | `json`, `jsonb` | `Yojson.Safe.t` |
 | enum types | a schema-prefixed variant |
-| `T[]` | `T Sqlml.Pg_array.t` |
+| `T[]` | `T Sqlkit.Pg_array.t` |
 | domains | underlying type, or custom mapping |
 | named composites | schema-prefixed records with optional fields |
-| ranges | `T Sqlml.Range.t` |
-| multiranges | `T Sqlml.Range.t list` |
+| ranges | `T Sqlkit.Range.t` |
+| multiranges | `T Sqlkit.Range.t list` |
 | `date` | `Ptime.date` |
 | `time` | `Ptime.Span.t` (since midnight) |
-| `interval` | `Sqlml.Interval.t` |
+| `interval` | `Sqlkit.Interval.t` |
 | `timetz`, `inet` | `string` |
 
 An unmapped type is an error naming the column, not a silent fall back to
@@ -182,10 +182,10 @@ SELECT id, email FROM users WHERE id = ANY(:ids);
 ```
 
 ```ocaml
-val get_users_by_ids : Sqlml.conn -> ids:Uuidm.t Sqlml.Pg_array.t -> (get_users_by_ids_row list, _) result
+val get_users_by_ids : Sqlkit.conn -> ids:Uuidm.t Sqlkit.Pg_array.t -> (get_users_by_ids_row list, _) result
 ```
 
-Use `Sqlml.Pg_array.of_list ids` for a conventional list. Arrays preserve NULL
+Use `Sqlkit.Pg_array.of_list ids` for a conventional list. Arrays preserve NULL
 elements, dimensions, and lower bounds; `to_list` rejects values that cannot be
 represented faithfully as a plain list. Range bounds distinguish empty,
 unbounded, inclusive, and exclusive values; PostgreSQL performs canonicalization.
@@ -199,9 +199,22 @@ and written as UTC wall-clock time by convention — prefer `timestamptz`. Both
 drivers pin `datestyle = ISO` per connection, so a server configured with
 `German` or `SQL` output styles cannot poison temporal decoding.
 
-`Sqlml.Interval.t` is `{ months; days; micros }` — three independent fields,
-because a month has no fixed length and a day is not always 24 hours. Parsing
-accepts all four PostgreSQL `IntervalStyle` output formats.
+`Sqlkit.Interval.t` is a private record with readable `months`, `days`, and
+`micros` fields. Use `Interval.make` (result), `make_opt`, or `make_exn` to
+construct one. Months and days fit signed 32-bit integers; time fits signed
+64-bit microseconds. Constructors check intermediate arithmetic and reject
+PostgreSQL's reserved infinity representations.
+
+The three components keep their independent signs: a month has no fixed length
+and a day is not always 24 hours. Parsing accepts all four PostgreSQL
+`IntervalStyle` output formats and preserves microseconds exactly. Fractional
+seconds beyond microsecond precision are accepted only when the extra digits
+are zero. Infinity is not represented.
+
+```ocaml
+let duration = Sqlkit.Interval.make ~months:1 ~days:(-2) ~hours:3 ()
+(* (Sqlkit.Interval.t, Sqlkit.Codec.error) result *)
+```
 
 Note that `jsonb` is a normalised representation: PostgreSQL reorders object
 keys and drops duplicates, so a round-trip preserves the value, not the text.
@@ -209,7 +222,7 @@ Use `json` if you need the text preserved exactly.
 
 ## Configuration
 
-An optional `sqlml.toml` beside your queries directory controls the two things
+An optional `sqlkit.toml` beside your queries directory controls the two things
 that cannot be inferred: what generated names are called, and which OCaml type
 a column maps to.
 
@@ -251,15 +264,15 @@ Failures carry a SQLSTATE, so a handler can act on them:
 ```ocaml
 match create_user conn ~id ~email () with
 | Ok _ -> respond `Created
-| Error e when Sqlml.Error.is_unique_violation e ->
-  respond (`Conflict (Option.value (Sqlml.Error.constraint_name e) ~default:"duplicate"))
-| Error e when Sqlml.Error.is_retryable e -> retry ()
-| Error e -> log (Sqlml.Error.to_string e); respond `Internal_error
+| Error e when Sqlkit.Error.is_unique_violation e ->
+  respond (`Conflict (Option.value (Sqlkit.Error.constraint_name e) ~default:"duplicate"))
+| Error e when Sqlkit.Error.is_retryable e -> retry ()
+| Error e -> log (Sqlkit.Error.to_string e); respond `Internal_error
 ```
 
-`Sqlml.Sqlstate` covers all 262 PostgreSQL codes across 43 classes, with
+`Sqlkit.Sqlstate` covers all 262 PostgreSQL codes across 43 classes, with
 `condition` for matching, `name`, `class_`, and predicates including
-`is_retryable` (serialization failure, deadlock, or connection loss).
+`is_retryable` (serialization failure or deadlock after successful cleanup).
 
 The libpq driver also reports the constraint name, detail, hint, table and
 column. The Caqti driver reports only the message and code, which is all Caqti
@@ -271,7 +284,7 @@ For results too large to hold as a list, rows are read in batches from a
 server-side cursor, so memory is bounded by the batch size:
 
 ```ocaml
-Sqlml.fetch_fold (module Db.Search_users) ~batch:1000 conn
+Sqlkit.fetch_fold (module Db.Search_users) ~batch:1000 conn
   { organization_id; email_pattern = "%"; limit = 1_000_000 }
   ~init:0 ~f:(fun n _row -> n + 1)
 ```
@@ -296,9 +309,9 @@ LIMIT :limit;
 
 ```ocaml
 val find_users :
-  Sqlml.conn -> org:Uuidm.t -> limit:int64 ->
+  Sqlkit.conn -> org:Uuidm.t -> limit:int64 ->
   ?email:string -> ?status:public_user_status -> unit ->
-  (find_users_row list, Sqlml.Error.t) result
+  (find_users_row list, Sqlkit.Error.t) result
 ```
 
 Every inclusion combination is generated as its own statement and verified
@@ -311,18 +324,77 @@ verified).
 
 A parameter inside a block must belong to that block alone. A block with
 several parameters is included when all of them are supplied; supplying only
-some raises `Invalid_argument`.
+some returns `Error.Encode` before executing SQL.
+
+## Result and exception APIs
+
+Plain fallible functions return `result`. `_opt` codec adapters discard error details;
+`_exn` adapters raise. Total functions such as `Pg_array.of_list` return values directly.
+OCaml identifiers cannot end in `!`; `_exn` is the exception marker. SQL `!` annotations
+remain assertions about nullability or row cardinality, and do not select an exception API.
+
+```ocaml
+Sqlkit.Pg_array.of_string Sqlkit.Row.Elem.int "{1,NULL,3}"
+(* Ok array, preserving the NULL element *)
+Sqlkit.Pg_array.of_string_opt Sqlkit.Row.Elem.int "malformed"
+(* None *)
+Sqlkit.Pg_array.of_string_exn Sqlkit.Row.Elem.int "malformed"
+(* raises Sqlkit.Codec.Codec_error *)
+```
+
+Custom `of_string` functions return `(t, Sqlkit.Codec.error) result`; custom
+`to_string` functions return `(string, Sqlkit.Codec.error) result`. Container
+callbacks follow those contracts. Invalid input is an `Error`, not an exception.
+To adapt an existing string diagnostic, use `Result.map_error Sqlkit.Codec.custom`.
+
+Codec errors contain a typed `reason` and an ordered `path`. Reasons distinguish
+invalid syntax/values, NULL, type/shape mismatches, enum labels, inconsistent
+parameters, NUL text, and custom failures. Generated paths include column and
+parameter names, composite fields, array subscripts, range bounds, and COPY rows.
+Array subscripts follow PostgreSQL, including custom lower bounds; other indexes
+are zero-based. Syntax offsets refer to bytes in the parsed containing value,
+after any outer whitespace trimming.
+
+`Error.Encode { query; error }` and `Error.Decode { query; error }` retain that
+structure. Inspect it when useful, or handle every error with `Sqlkit.Error.pp`:
+
+```ocaml
+let report error =
+  match Sqlkit.Error.codec_error error with
+  | Some { reason = Sqlkit.Codec.Unknown_enum { type_name; value; _ }; _ } ->
+      Printf.eprintf "Unknown %s label: %S\n" type_name value
+  | _ -> Format.eprintf "%a@." Sqlkit.Error.pp error
+```
+
+Use `Sqlkit.Codec.pp` for standalone codec failures. Human-readable wording is not
+a machine-readable contract. Generated query `sql` and `encode` return codec
+results; `decode` returns `Sqlkit.Row.error`, an alias of `Sqlkit.Codec.error`.
+
+Migration: regenerate query modules, adapt custom string errors with
+`Codec.custom`, and replace matches on `Row.error`'s former `column/expected/got`
+fields or `Error.Encode.message` with reason/path inspection or generic formatting.
+
+Query absence stays distinct from failure: `:one` returns `(row option, Error.t) result`.
+`Ok None` means no row; a database failure never becomes absence. Generated `_exn`
+functions derive from their result counterpart using `Sqlkit.get_exn`.
+
+Unexpected ordinary exceptions from query codecs and transaction/streaming callbacks
+are translated at the execution boundary into `Error.Callback`. Runtime cancellation,
+`Out_of_memory`, `Stack_overflow`, and `Sys.Break` propagate after scoped cleanup.
+The core does not use exceptions for parsing, validation, or error propagation.
 
 ## Transactions
 
 ```ocaml
-Sqlml.transaction ~isolation:`Serializable ~retry:3 conn (fun tx ->
+Sqlkit.transaction ~isolation:`Serializable ~retry:3 conn (fun tx ->
   let* balance = get_balance tx ~id in
   set_balance tx ~id ~balance:(debit balance amount))
 ```
 
-Commits when the body returns `Ok`, rolls back on `Error` or on an exception,
-which is re-raised. Generated functions take the transaction handle unchanged.
+Commits when the body returns `Ok`, and rolls back on `Error` or an exception.
+A raised `Sql_error` becomes its original error; other ordinary callback exceptions
+become `Error.Callback`. Cancellation propagates after cleanup. Generated functions
+take the transaction handle unchanged.
 
 Nesting uses savepoints, so an inner failure rolls back only the inner work.
 `~retry` re-runs the body on a serialization failure or deadlock — the standard
@@ -331,15 +403,15 @@ fail identically again. The body must be safe to re-run.
 
 ## Drivers
 
-`sqlml-postgresql` gives you a single connection over libpq. Each distinct
+`sqlkit-postgresql` gives you a single connection over libpq. Each distinct
 query is prepared once per connection and executed by name afterwards, so the
 server plans it once, not per call:
 
 ```ocaml
-let conn = Result.get_ok (Sqlml_pg.connect (Sqlml_pg.conninfo_of_env ()))
+let conn = Result.get_ok (Sqlkit_pg.connect (Sqlkit_pg.conninfo_of_env ()))
 ```
 
-`sqlml-caqti` gives you a pool over Caqti and Eio. Eio is direct style, so
+`sqlkit-caqti` gives you a pool over Caqti and Eio. Eio is direct style, so
 generated signatures do not change:
 
 ```ocaml
@@ -347,10 +419,10 @@ Eio_main.run @@ fun env ->
 Eio.Switch.run @@ fun sw ->
 let pool =
   Result.get_ok
-    (Sqlml_caqti.Pool.create ~sw ~stdenv:(env :> Caqti_eio.stdenv) ~max_size:10
-       (Sqlml_caqti.uri_of_env ()))
+    (Sqlkit_caqti.Pool.create ~sw ~stdenv:(env :> Caqti_eio.stdenv) ~max_size:10
+       (Sqlkit_caqti.uri_of_env ()))
 in
-Sqlml_caqti.Pool.use pool (fun conn -> get_user conn ~id)
+Sqlkit_caqti.Pool.use pool (fun conn -> get_user conn ~id)
 ```
 
 A pool exposes no query operations. Reaching a connection requires `Pool.use` or
@@ -372,7 +444,7 @@ A missing or mismatched `ocamlformat` is an error.
 docker compose up -d     # PostgreSQL 18 on 127.0.0.1:55432
 dune build               # dune package management: fetches deps from dune.lock
 dune test                # unit tests, no database
-DATABASE_URL=postgresql://sqlml:sqlml@127.0.0.1:55432/sqlml dune exec example/e2e.exe
+DATABASE_URL=postgresql://sqlkit:sqlkit@127.0.0.1:55432/sqlkit dune exec example/e2e.exe
 ```
 
 `example/` holds a worked schema, queries, generated output, and three
@@ -384,9 +456,20 @@ type mappings.
 See [the inference suite](integration/README.md) for the 1,000-case PR gate,
 10,000-case extended gate, compiled decoders, and pinned pGenie comparison.
 
+The result-contract migration changes custom codecs, `Query.sql`/`encode`/`decode`,
+container parsers/printers, `Row` decoders, and `Interval.of_string`. Use `_exn` only
+at an explicitly exception-based call site; otherwise bind the result. `or_raise`
+is now `get_exn`, and `close` returns a result (`close_exn` is the raising adapter).
+Third-party drivers must implement cancellation classification and protected cleanup.
+
+`Interval.make` now returns a result. Replace direct interval record construction
+or updates with a validated constructor; field reads still work. Use `make_exn`
+for trusted constants at explicitly exception-based call sites, or `make_opt`
+when the reason for failure is unnecessary.
+
 Regenerate snapshots and generated code after upgrading: version 1 snapshots are
 rejected. Result fields become optional, `int8` parameters/results become `int64`,
-and array APIs use `Sqlml.Pg_array.t`. Named database types and shared row models
+and array APIs use `Sqlkit.Pg_array.t`. Named database types and shared row models
 use schema-prefixed names unless renamed. Qualified configuration keys win;
 unqualified shorthands must be unambiguous. Exact column/parameter or type
 mappings replace the entire value; otherwise component mappings apply recursively.
@@ -404,10 +487,16 @@ mappings replace the entire value; otherwise component mappings apply recursivel
 - The Caqti driver reports SQLSTATE but not the constraint name, detail or
   hint; libpq reports all of them.
 
+## Compatibility
+
+Until **1.0.0**, APIs may change incompatibly, including within 0.1.x. Breaking
+changes will be documented with migration guidance. The 0.1 API review establishes
+the current design; long-term compatibility commitments begin at 1.0.0.
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md). Next: review the 0.1 public APIs, then exercise them
-in a nontrivial web application before declaring them stable.
+in a nontrivial web application. Breaking changes remain allowed until 1.0.0.
 
 ## Prior art
 
@@ -419,3 +508,59 @@ for the idea of typing queries against a live database, and
 ## License
 
 MIT
+
+### Operational limits and telemetry
+
+Both drivers apply `Sqlkit.Limits.default` to new sessions: statement timeout
+30 seconds, lock timeout 5 seconds, idle transaction timeout 60 seconds. Set a
+server timeout to zero to disable it, or pass `Sqlkit.Limits.unlimited`.
+
+```ocaml
+let observe (event : Sqlkit.Telemetry.event) =
+  (* Enqueue in your metrics/logging system; keep this callback quick. *)
+  Printf.eprintf "%s %.3fs\n" event.name event.duration_s
+in
+let pool =
+  Sqlkit_caqti.Pool.create ~sw ~stdenv ~max_size:10
+    ~acquire_timeout:5. ~connect_timeout:10. ~query_timeout:35.
+    ~limits:Sqlkit.Limits.default ~observe (Sqlkit_caqti.uri_of_env ())
+in
+(* Pool.create and query functions return results; use Sqlkit.get_exn when desired. *)
+pool
+```
+
+Those are the pool defaults; client deadlines are positive, finite seconds.
+Acquisition includes opening/configuring a new connection. Its deadline ends
+before your callback begins. The query deadline covers each driver operation,
+including each streaming batch, rather than the whole request or transaction.
+The pool is lazy, has a fixed maximum size, and belongs to one Eio domain/switch.
+Use separate borrows for concurrent requests; use a connection sequentially.
+Borrowed handles become unusable when the callback returns.
+
+Client timeouts return `Error.Timeout` with an acquisition, connection, or query
+phase. Server timeouts retain PostgreSQL's SQLSTATE (`57014`/`55P03`). Active
+client cancellation discards the connection; the next borrow opens a fresh one.
+Failed rollback returns `Error.Cleanup { primary; cleanup }` and also discards it.
+Transport errors are never automatically replayed. In particular, connection
+loss during COMMIT leaves the outcome uncertain; resolve that through your
+application's idempotency key or durable state before retrying.
+
+Events contain query names, monotonic elapsed seconds, outcomes, and SQLSTATE
+when available. They include pool waits and rollback cleanup, with no SQL,
+parameters, row values, or error messages. Ordinary observer exceptions are
+ignored. Cancellation remains an exception after cleanup.
+
+`Sqlkit_pg.connect` accepts `~limits`, `~observe`, and integer
+`~connect_timeout` (default 10 seconds per host). Its blocking libpq execution
+has server-side limits but **no client query deadline**; use the Eio driver for
+web request deadlines. Caqti transport errors may have no SQLSTATE when its
+underlying driver does not expose one.
+
+Migration: generated `:exec` results now contain `int option`. `Some 0` is a
+real zero-row result; `None` means no count was supplied. Both drivers return
+actual DML counts. Regenerate code and update comparisons/pattern matches.
+
+The Caqti adapter currently includes a compatibility copy of Caqti 3.0's
+PostgreSQL backend for asynchronous connection startup and cleanup. Caqti is
+pinned to 3.0 while that patch uses its private interfaces. See
+[compatibility notes](lib/driver_caqti/vendor/README.md).

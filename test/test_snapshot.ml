@@ -9,7 +9,7 @@ let check what b =
     Printf.printf "FAIL %s\n" what;
     exit 1)
 
-open Sqlml_gen
+open Sqlkit_gen
 
 let contains hay needle =
   let nh = String.length hay and nn = String.length needle in
@@ -32,7 +32,7 @@ let described ?(model = None) src ~params ~columns =
   Describe.v_described ~query:(parse1 src) ~params ~columns ~model_table:model
 
 let with_dir f =
-  let dir = Filename.temp_file "sqlml_snap" "" in
+  let dir = Filename.temp_file "sqlkit_snap" "" in
   Sys.remove dir;
   Unix.mkdir dir 0o755;
   Fun.protect
@@ -97,7 +97,7 @@ let () =
       with
       | Error d ->
           check "v1 snapshot requires regeneration"
-            (contains (Diag.to_string d) "re-run `sqlml snapshot`")
+            (contains (Diag.to_string d) "re-run `sqlkit snapshot`")
       | Ok _ -> check "v1 snapshot requires regeneration" false);
 
   (* ---------- staleness is loud and names the culprit ---------- *)
@@ -105,7 +105,7 @@ let () =
       match Snapshot.describe_offline ~queries_dir:dir ~config:Config.empty [] with
       | Error d ->
           check "missing snapshot names the fix"
-            (contains (Diag.to_string d) "sqlml snapshot")
+            (contains (Diag.to_string d) "sqlkit snapshot")
       | Ok _ -> check "missing snapshot names the fix" false);
 
   with_dir (fun dir ->
@@ -127,7 +127,7 @@ let () =
 
   (* ---------- schema files hash into the snapshot ---------- *)
   with_dir (fun dir ->
-      write_file (Filename.concat dir "sqlml.toml") "schema = [\"s.sql\"]\n";
+      write_file (Filename.concat dir "sqlkit.toml") "schema = [\"s.sql\"]\n";
       write_file (Filename.concat dir "s.sql") "CREATE TABLE t (a int);\n";
       let config =
         match Config.load dir with Ok c -> c | Error _ -> failwith "config"

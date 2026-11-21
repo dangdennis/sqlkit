@@ -2,4 +2,4 @@
 
 (library
  (name generated)
- (libraries sqlml ptime uuidm decimal yojson))
+ (libraries sqlkit ptime uuidm decimal yojson))

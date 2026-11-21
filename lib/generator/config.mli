@@ -1,4 +1,4 @@
-(** Optional [sqlml.toml] beside the queries directory: renames for generated names, and
+(** Optional [sqlkit.toml] beside the queries directory: renames for generated names, and
     mappings from columns or whole Postgres types to user OCaml types. See the README for
     the file format. *)
 
@@ -8,7 +8,7 @@ type t
 val empty : t
 
 val load : string -> (t, Diag.t) result
-(** [load dir] reads [dir/sqlml.toml]; missing file is [Ok empty]. *)
+(** [load dir] reads [dir/sqlkit.toml]; missing file is [Ok empty]. *)
 
 val renamed : t -> string -> string option
 (** Lookup for a table name ([users]) or field key ([users.display_name]). *)

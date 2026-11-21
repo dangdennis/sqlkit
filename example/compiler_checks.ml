@@ -1,16 +1,17 @@
 open Generated
 
 let run ?(copy = false) ~check ~id conn =
+  Interval_checks.run ~check ~id conn;
   let bytes = "\000\255\\" in
   let items =
-    Sqlml.Pg_array.make
+    Sqlkit.Pg_array.make_exn
       ~dimensions:[ { lower = 1; length = 3 } ]
       [ Some bytes; None; Some "" ]
   in
   let binary = Db.binary_containers_exn conn ~bytes ~items in
   check "bytea scalar and nested array"
     (binary.bytes = Some bytes && binary.items = Some items);
-  let open Sqlml.Range in
+  let open Sqlkit.Range in
   let span =
     Bounds { lower = Inclusive Int64.min_int; upper = Exclusive Int64.max_int }
   in
@@ -19,7 +20,7 @@ let run ?(copy = false) ~check ~id conn =
       label = Some "comma, quote\" slash\\ (NULL)";
       states =
         Some
-          (Sqlml.Pg_array.make
+          (Sqlkit.Pg_array.make_exn
              ~dimensions:[ { lower = 0; length = 3 } ]
              [ Some (Db.Open : Db.compiler_a_status); None; Some Db.Closed ]);
       amount = Some Int64.max_int;
@@ -31,16 +32,16 @@ let run ?(copy = false) ~check ~id conn =
     { label = None; states = None; amount = None; span = None }
   in
   let payloads =
-    Sqlml.Pg_array.make
+    Sqlkit.Pg_array.make_exn
       ~dimensions:[ { lower = 1; length = 3 } ]
       [ Some payload; None; Some empty ]
   in
   let matrix =
-    Sqlml.Pg_array.make
+    Sqlkit.Pg_array.make_exn
       ~dimensions:[ { lower = -2; length = 2 }; { lower = 4; length = 2 } ]
       [ Some Int64.min_int; None; Some Int64.max_int; Some 0L ]
   in
-  let positives = Sqlml.Pg_array.of_list [ 1L; Int64.max_int ] in
+  let positives = Sqlkit.Pg_array.of_list [ 1L; Int64.max_int ] in
   let spans = [ span ] in
   let words = Bounds { lower = Inclusive "a,\"\\"; upper = Exclusive "z)" } in
   ignore
@@ -66,7 +67,7 @@ let run ?(copy = false) ~check ~id conn =
   check "empty ranges" (row.spans = Some [] && row.words = Some Empty);
   if copy then begin
     let outcome =
-      Sqlml.transaction conn (fun tx ->
+      Sqlkit.transaction conn (fun tx ->
           let row : Db.Copy_compiler_value.params =
             {
               id = -id;
@@ -84,10 +85,32 @@ let run ?(copy = false) ~check ~id conn =
           check "COPY nested containers"
             (got.payload = Some payload && got.matrix = Some matrix
            && got.words = Some words);
-          Error (Sqlml.Error.Connect "rollback compiler COPY fixture"))
+          Error (Sqlkit.Error.Connect "rollback compiler COPY fixture"))
     in
     check "COPY fixture rolled back" (Result.is_error outcome)
   end;
+  let invalid_text = { payload with label = Some "bad\000text" } in
+  check "nested NUL text returns encoding error"
+    (match
+       Db.put_compiler_value conn ~id ~payload:invalid_text ~payloads ~matrix ~positives
+         ~spans ~words ()
+     with
+    | Error
+        (Sqlkit.Error.Encode
+           {
+             error =
+               {
+                 reason = Sqlkit.Codec.Nul_byte;
+                 path =
+                   [
+                     Sqlkit.Codec.Parameter "payload";
+                     Sqlkit.Codec.Field { index = 0; name = Some "label" };
+                   ];
+               };
+             _;
+           }) ->
+        true
+    | _ -> false);
   let bad = { payload with amount = Some (-1L) } in
   match
     Db.put_compiler_value conn ~id ~payload:bad ~payloads ~matrix ~positives ~spans ~words
@@ -95,5 +118,5 @@ let run ?(copy = false) ~check ~id conn =
   with
   | Error e ->
       check "domain constraint SQLSTATE"
-        (Option.map Sqlml.Sqlstate.to_string (Sqlml.Error.sqlstate e) = Some "23514")
+        (Option.map Sqlkit.Sqlstate.to_string (Sqlkit.Error.sqlstate e) = Some "23514")
   | Ok _ -> check "domain constraint SQLSTATE" false

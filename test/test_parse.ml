@@ -8,7 +8,7 @@ let check what b =
     Printf.printf "FAIL %s\n" what;
     exit 1)
 
-open Sqlml_gen
+open Sqlkit_gen
 
 let contains hay needle =
   let nh = String.length hay and nn = String.length needle in

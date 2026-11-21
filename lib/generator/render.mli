@@ -7,5 +7,5 @@ val source :
   composites:(string * Resolve.field list) list ->
   rows:(string * Resolve.field list) list ->
   Resolve.resolved list ->
-  string * string
+  (string * string, Diag.t) result
 (** [(mli, ml)] contents. *)

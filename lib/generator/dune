@@ -1,7 +1,7 @@
-; Private: the generator is an implementation detail of the `sqlml` binary and
+; Private: the generator is an implementation detail of the `sqlkit` binary and
 ; the test suite. (package) keeps it buildable under `dune build -p`.
 
 (library
- (name sqlml_gen)
- (package sqlml-postgresql)
+ (name sqlkit_gen)
+ (package sqlkit-postgresql)
  (libraries unix otoml yojson pq))

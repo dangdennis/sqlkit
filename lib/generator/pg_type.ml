@@ -28,7 +28,12 @@ let qualified id =
   quote id.schema ^ "." ^ quote id.name
 
 let generated_name id = Parse.to_snake (id.schema ^ "_" ^ id.name)
-let kind t = List.assoc t.id t.registry
+
+let kind t =
+  match List.assoc_opt t.id t.registry with
+  | Some k -> k
+  | None -> Unsupported ("missing graph node " ^ qualified t.id)
+
 let at t id = { t with id }
 
 let refs = function
@@ -51,6 +56,11 @@ let legacy ~name ~element ~labels =
 
 let discover conn roots =
   let ( let* ) = Result.bind in
+  let integer s =
+    match int_of_string_opt s with
+    | Some n -> Ok n
+    | None -> Diag.error "catalog: invalid integer %S" s
+  in
   let query s =
     Result.map_error (fun (e : Pq.diag) -> Diag.v e.message) (Pq.query conn s)
   in
@@ -94,7 +104,9 @@ let discover conn roots =
         | [ r ] ->
             begin match r.(0) with
             | "d" ->
-                let* base = visit (int_of_string r.(1)) in
+                let* base_oid = integer r.(1) in
+                let* base = visit base_oid in
+                let* typmod = integer r.(3) in
                 let* cs =
                   query
                     (Printf.sprintf
@@ -107,7 +119,7 @@ let discover conn roots =
                      {
                        base;
                        not_null = r.(2) = "t";
-                       typmod = int_of_string r.(3);
+                       typmod;
                        constraints = List.map (fun x -> x.(0)) cs;
                      })
             | "e" ->
@@ -131,14 +143,11 @@ let discover conn roots =
                 let* attrs =
                   Gen_util.map_result
                     (fun a ->
-                      let* typ = visit (int_of_string a.(1)) in
-                      Ok
-                        {
-                          name = a.(0);
-                          typ;
-                          number = int_of_string a.(2);
-                          typmod = int_of_string a.(3);
-                        })
+                      let* oid = integer a.(1) in
+                      let* typ = visit oid in
+                      let* number = integer a.(2) in
+                      let* typmod = integer a.(3) in
+                      Ok { name = a.(0); typ; number; typmod })
                     rs
                 in
                 Ok (Composite attrs)
@@ -152,11 +161,12 @@ let discover conn roots =
                 in
                 match rs with
                 | [ a ] ->
-                    let* child = visit (int_of_string a.(if tag = "r" then 0 else 1)) in
+                    let* oid = integer a.(if tag = "r" then 0 else 1) in
+                    let* child = visit oid in
                     Ok (if tag = "r" then Range child else Multirange child)
                 | _ -> Diag.error "catalog: missing range %s" (qualified id))
             | "b" when r.(7) = "t" && r.(5) <> "0" -> (
-                let elem_oid = int_of_string r.(5) in
+                let* elem_oid = integer r.(5) in
                 let* element = visit elem_oid in
                 let* rs =
                   query
@@ -176,15 +186,23 @@ let discover conn roots =
     end
   in
   let* _ = Gen_util.map_result visit (List.sort_uniq compare roots) in
-  let registry =
-    Hashtbl.fold (fun oid k xs -> (Hashtbl.find ids oid, k) :: xs) nodes []
-    |> List.sort compare
+  let* registry =
+    Gen_util.map_result
+      (fun (oid, k) ->
+        let* id = identity oid in
+        Ok (id, k))
+      (Hashtbl.fold (fun oid k xs -> (oid, k) :: xs) nodes [])
   in
-  Ok (List.map (fun oid -> (oid, { id = Hashtbl.find ids oid; registry })) roots)
+  let registry = List.sort compare registry in
+  Gen_util.map_result
+    (fun oid ->
+      let* id = identity oid in
+      Ok (oid, { id; registry }))
+    roots
 
 let json_id id = `List [ `String id.schema; `String id.name ]
 
-let to_json t =
+let registry_json t =
   let kind = function
     | Base -> `List [ `String "base" ]
     | Enum xs -> `List [ `String "enum"; `List (List.map (fun s -> `String s) xs) ]
@@ -213,53 +231,67 @@ let to_json t =
     | Multirange r -> `List [ `String "multirange"; json_id r ]
     | Unsupported s -> `List [ `String "unsupported"; `String s ]
   in
-  `Assoc
-    [
-      ("root", json_id t.id);
-      ( "types",
-        `List
-          (List.map
-             (fun (id, k) -> `List [ json_id id; kind k ])
-             (List.sort compare t.registry)) );
-    ]
+  List.map (fun (id, k) -> `List [ json_id id; kind k ]) (List.sort compare t.registry)
+
+let to_json t = `Assoc [ ("root", json_id t.id); ("types", `List (registry_json t)) ]
 
 let of_json j =
-  let bad () = invalid_arg "invalid PostgreSQL type graph" in
+  let ( let* ) = Result.bind in
+  let bad () = Diag.error "invalid PostgreSQL type graph" in
   let id = function
-    | `List [ `String schema; `String name ] -> { schema; name }
+    | `List [ `String schema; `String name ] -> Ok { schema; name }
     | _ -> bad ()
   in
   let strings = function
-    | `List xs -> List.map (function `String s -> s | _ -> bad ()) xs
+    | `List xs -> Gen_util.map_result (function `String s -> Ok s | _ -> bad ()) xs
     | _ -> bad ()
   in
   let kind = function
-    | `List [ `String "base" ] -> Base
-    | `List [ `String "enum"; xs ] -> Enum (strings xs)
+    | `List [ `String "base" ] -> Ok Base
+    | `List [ `String "enum"; xs ] ->
+        let* xs = strings xs in
+        Ok (Enum xs)
     | `List [ `String "domain"; b; `Bool not_null; `Int typmod; cs ] ->
-        Domain { base = id b; not_null; typmod; constraints = strings cs }
+        let* base = id b in
+        let* constraints = strings cs in
+        Ok (Domain { base; not_null; typmod; constraints })
     | `List [ `String "array"; e; `String d ] when String.length d = 1 ->
-        Array { element = id e; delimiter = d.[0] }
+        let* element = id e in
+        Ok (Array { element; delimiter = d.[0] })
     | `List [ `String "composite"; `List xs ] ->
-        Composite
-          (List.map
-             (function
-               | `List [ `String name; t; `Int number; `Int typmod ] ->
-                   { name; typ = id t; number; typmod }
-               | _ -> bad ())
-             xs)
-    | `List [ `String "range"; r ] -> Range (id r)
-    | `List [ `String "multirange"; r ] -> Multirange (id r)
-    | `List [ `String "unsupported"; `String s ] -> Unsupported s
+        let* xs =
+          Gen_util.map_result
+            (function
+              | `List [ `String name; t; `Int number; `Int typmod ] ->
+                  let* typ = id t in
+                  Ok { name; typ; number; typmod }
+              | _ -> bad ())
+            xs
+        in
+        Ok (Composite xs)
+    | `List [ `String "range"; r ] ->
+        let* r = id r in
+        Ok (Range r)
+    | `List [ `String "multirange"; r ] ->
+        let* r = id r in
+        Ok (Multirange r)
+    | `List [ `String "unsupported"; `String s ] -> Ok (Unsupported s)
     | _ -> bad ()
   in
   match j with
   | `Assoc xs ->
-      let root = try id (List.assoc "root" xs) with Not_found -> bad () in
-      let registry =
+      let* root = match List.assoc_opt "root" xs with Some x -> id x | None -> bad () in
+      let* registry =
         match List.assoc_opt "types" xs with
         | Some (`List xs) ->
-            List.map (function `List [ i; k ] -> (id i, kind k) | _ -> bad ()) xs
+            Gen_util.map_result
+              (function
+                | `List [ i; k ] ->
+                    let* i = id i in
+                    let* k = kind k in
+                    Ok (i, k)
+                | _ -> bad ())
+              xs
         | _ -> bad ()
       in
       let keys = List.map fst registry in
@@ -269,6 +301,6 @@ let of_json j =
         || List.exists
              (fun (_, k) -> List.exists (fun id -> not (List.mem id keys)) (refs k))
              registry
-      then bad ();
-      { id = root; registry }
+      then bad ()
+      else Ok { id = root; registry }
   | _ -> bad ()

@@ -13,7 +13,7 @@ type t = {
 }
 
 let empty = { rename = []; customs = []; schema = [] }
-let filename = "sqlml.toml"
+let filename = "sqlkit.toml"
 
 open Gen_util
 

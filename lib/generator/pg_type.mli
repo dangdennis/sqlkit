@@ -22,9 +22,9 @@ val kind : t -> kind
 val at : t -> id -> t
 val discover : Pq.conn -> int list -> ((int * t) list, Diag.t) result
 val to_json : t -> Yojson.Safe.t
-
-val of_json : Yojson.Safe.t -> t
-(** Raises [Invalid_argument] on malformed or dangling graphs. *)
+val json_id : id -> Yojson.Safe.t
+val registry_json : t -> Yojson.Safe.t list
+val of_json : Yojson.Safe.t -> (t, Diag.t) result
 
 val legacy : name:string -> element:string option -> labels:string list -> t
 (** Fixture constructor; live inference always uses [discover]. *)

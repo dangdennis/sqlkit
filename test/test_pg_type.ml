@@ -1,4 +1,4 @@
-open Sqlml_gen
+open Sqlkit_gen
 
 let check label condition = if not condition then failwith label
 let id schema name : Pg_type.id = { schema; name }
@@ -18,7 +18,7 @@ let () =
   let a = id "a" "status" and b = id "b" "status" in
   let registry = [ (a, Pg_type.Enum [ "open" ]); (b, Pg_type.Enum [ "open" ]) ] in
   let ta : Pg_type.t = { id = a; registry } and tb : Pg_type.t = { id = b; registry } in
-  check "schema identity survives JSON" (Pg_type.of_json (Pg_type.to_json ta) = ta);
+  check "schema identity survives JSON" (Pg_type.of_json (Pg_type.to_json ta) = Ok ta);
   check "same labels do not merge identities"
     (Typemap.of_type ta ~nullable:false <> Typemap.of_type tb ~nullable:false);
   check "schema enums emit together"
@@ -56,15 +56,13 @@ let () =
         ];
     }
   in
-  check "recursive graph JSON" (Pg_type.of_json (Pg_type.to_json t) = t);
+  check "recursive graph JSON" (Pg_type.of_json (Pg_type.to_json t) = Ok t);
   check "recursive declaration terminates"
     (Result.is_ok (Emit.generate ~src:"test" [ describe [ column "node" t ] ]));
   let broken : Pg_type.t = { id = d; registry = [ (d, Pg_type.Range base) ] } in
   check "dangling graph rejected"
-    (try
-       ignore (Pg_type.of_json (Pg_type.to_json broken));
-       false
-     with Invalid_argument _ -> true);
+    (Result.is_error (Pg_type.of_json (Pg_type.to_json broken)));
+
   let empty_id = id "a" "empty" in
   let empty : Pg_type.t = { id = empty_id; registry = [ (empty_id, Pg_type.Enum []) ] } in
   check "empty enum emits"

@@ -8,7 +8,7 @@ let check what b =
     Printf.printf "FAIL %s\n" what;
     exit 1)
 
-open Sqlml
+open Sqlkit
 
 let () =
   check "table has all 262 codes" (List.length Sqlstate.all = 262);

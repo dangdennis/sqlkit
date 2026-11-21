@@ -76,7 +76,22 @@ let table_info conn oids =
             n.oid=c.relnamespace where c.oid in (%s)"
            (quote_ints oids))
     in
-    Ok (List.map (fun r -> (int_of_string r.(0), (r.(1), int_of_string r.(2)))) rows)
+    Gen_util.map_result
+      (fun r ->
+        match (int_of_string_opt r.(0), int_of_string_opt r.(2)) with
+        | Some oid, Some count -> Ok (oid, (r.(1), count))
+        | _ ->
+            Error
+              {
+                Pq.message = "catalog: invalid table metadata";
+                sqlstate = None;
+                detail = None;
+                hint = None;
+                constraint_name = None;
+                table_name = None;
+                column_name = None;
+              })
+      rows
 
 (* ---------- describing one query ---------- *)
 
@@ -198,11 +213,12 @@ let describe_all conn (queries : Parse.t list) =
   let rec collect acc i = function
     | [] -> Ok (List.rev acc)
     | q :: tl -> (
-        match describe_one conn q ~stmt_name:(Printf.sprintf "sqlml_%d" i) with
+        match describe_one conn q ~stmt_name:(Printf.sprintf "sqlkit_%d" i) with
         | Error e -> Error e
         | Ok (params, cols) -> (
             match
-              check_variants conn q ~stmt_base:(Printf.sprintf "sqlml_%d" i)
+              check_variants conn q
+                ~stmt_base:(Printf.sprintf "sqlkit_%d" i)
                 ~full_params:params ~full_cols:cols
             with
             | Error e -> Error e
@@ -220,73 +236,78 @@ let describe_all conn (queries : Parse.t list) =
   let catalog f = Result.map_error (fun (d : Pq.diag) -> Diag.v d.Pq.message) f in
   let* types = Pg_type.discover conn all_type_oids in
   let* tinfo = catalog (table_info conn all_tables) in
-  let info oid = List.assoc oid types in
-  Ok
-    (List.map
-       (fun (q, ps, cs) ->
-         let columns =
-           List.map
-             (fun c ->
-               let nullable =
-                 match c.roverride with
-                 | Force_not_null -> false
-                 | Force_nullable -> true
-                 | No_override -> true
-               in
-               {
-                 name = c.rname;
-                 pg_type = info c.rtype;
-                 typmod = c.rtypmod;
-                 table = Option.map fst (List.assoc_opt c.rtable tinfo);
-                 table_oid = c.rtable;
-                 table_col = c.rcol;
-                 nullable;
-               })
-             cs
-         in
-         (* Shared model: every column is a plain reference to the same table,
+  let info oid =
+    match List.assoc_opt oid types with
+    | Some t -> Ok t
+    | None -> Diag.error "catalog: missing type %d" oid
+  in
+  Gen_util.map_result
+    (fun (q, ps, cs) ->
+      let* columns =
+        Gen_util.map_result
+          (fun c ->
+            let* pg_type = info c.rtype in
+            let nullable =
+              match c.roverride with
+              | Force_not_null -> false
+              | Force_nullable -> true
+              | No_override -> true
+            in
+            Ok
+              {
+                name = c.rname;
+                pg_type;
+                typmod = c.rtypmod;
+                table = Option.map fst (List.assoc_opt c.rtable tinfo);
+                table_oid = c.rtable;
+                table_col = c.rcol;
+                nullable;
+              })
+          cs
+      in
+      (* Shared model: every column is a plain reference to the same table,
             and together they cover all of that table's live columns. A partial
             projection keeps its own per-query row type. *)
-         let model_table =
-           match columns with
-           | [] -> None
-           | first :: _ -> (
-               let t = first.table_oid in
-               if t = 0 || not (List.for_all (fun c -> c.table_oid = t) columns) then None
-               else
-                 match List.assoc_opt t tinfo with
-                 | Some (tname, live)
-                   when List.length columns = live
-                        && live
-                           = List.length (uniq (List.map (fun c -> c.table_col) columns))
-                   ->
-                     Some tname
-                 | _ -> None)
-         in
-         let params =
-           List.mapi
-             (fun i oid ->
-               let decl =
-                 List.find_opt
-                   (fun (p : Parse.param) -> p.Parse.index = i + 1)
-                   q.Parse.params
-               in
-               {
-                 index = i + 1;
-                 pname =
-                   (match decl with
-                   | Some p -> p.Parse.pname
-                   | None -> Printf.sprintf "arg%d" (i + 1));
-                 pg_type = info oid;
-                 pnullable =
-                   (match decl with Some p -> p.Parse.nullable | None -> false);
-               })
-             ps
-         in
-         { query = q; params; columns; model_table })
-       raws)
+      let model_table =
+        match columns with
+        | [] -> None
+        | first :: _ -> (
+            let t = first.table_oid in
+            if t = 0 || not (List.for_all (fun c -> c.table_oid = t) columns) then None
+            else
+              match List.assoc_opt t tinfo with
+              | Some (tname, live)
+                when List.length columns = live
+                     && live
+                        = List.length (uniq (List.map (fun c -> c.table_col) columns)) ->
+                  Some tname
+              | _ -> None)
+      in
+      let* params =
+        Gen_util.map_result
+          (fun (i, oid) ->
+            let* pg_type = info oid in
+            let decl =
+              List.find_opt
+                (fun (p : Parse.param) -> p.Parse.index = i + 1)
+                q.Parse.params
+            in
+            Ok
+              {
+                index = i + 1;
+                pname =
+                  (match decl with
+                  | Some p -> p.Parse.pname
+                  | None -> Printf.sprintf "arg%d" (i + 1));
+                pg_type;
+                pnullable = (match decl with Some p -> p.Parse.nullable | None -> false);
+              })
+          (List.mapi (fun i oid -> (i, oid)) ps)
+      in
+      Ok { query = q; params; columns; model_table })
+    raws
 
-(* Human-readable report for `sqlml describe`, one query per call. *)
+(* Human-readable report for `sqlkit describe`, one query per call. *)
 let report d =
   let b = Buffer.create 256 in
   let bp fmt = Printf.ksprintf (Buffer.add_string b) fmt in

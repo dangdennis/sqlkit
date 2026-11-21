@@ -80,7 +80,7 @@ let build ~queries_dir ~source =
   let* files = sql_files queries_dir in
   let* queries = parse_all files in
   let* () = check_unique_names queries in
-  (* config is read before the database round-trip: a typo in sqlml.toml
+  (* config is read before the database round-trip: a typo in sqlkit.toml
      should not require a live server to be reported *)
   let* config = Config.load queries_dir in
   let* described =
@@ -109,7 +109,7 @@ let snapshot ~queries_dir ~conninfo =
    which is also why a missing or mismatched ocamlformat is a loud failure
    rather than a skipped nicety: the two commands must format identically. *)
 let format ~name contents =
-  let tmp = Filename.temp_file "sqlml_fmt" (Filename.extension name) in
+  let tmp = Filename.temp_file "sqlkit_fmt" (Filename.extension name) in
   let cleanup () = try Sys.remove tmp with _ -> () in
   Fun.protect ~finally:cleanup (fun () ->
       let oc = open_out_bin tmp in
@@ -225,7 +225,7 @@ let check ~out_dir ~module_name b =
         [ (mli_path, b.mli); (ml_path, b.ml) ]))
 
 let string_of_drift = function
-  | Missing path -> Printf.sprintf "%s: missing -- has `sqlml generate` ever run?" path
+  | Missing path -> Printf.sprintf "%s: missing -- has `sqlkit generate` ever run?" path
   | Differs { path; line; expected; actual } ->
       Printf.sprintf "%s:%d: out of date\n  on disk:   %s\n  should be: %s" path line
         (String.trim actual) (String.trim expected)

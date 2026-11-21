@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate lib/sqlml/sqlstate.ml{,i} from PostgreSQL's errcodes.txt.
+"""Regenerate lib/sqlkit/sqlstate.ml{,i} from PostgreSQL's errcodes.txt.
 
     curl -O https://raw.githubusercontent.com/postgres/postgres/master/src/backend/utils/errcodes.txt
     python3 tools/gen_sqlstate.py errcodes.txt
@@ -12,7 +12,7 @@ is both 01004 and 22001) and the macros are unique.
 import re, sys, collections, pathlib
 
 src = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "errcodes.txt")
-out = pathlib.Path(__file__).resolve().parent.parent / "lib" / "sqlml"
+out = pathlib.Path(__file__).resolve().parent.parent / "lib" / "sqlkit"
 
 rows, classes, cur = [], [], None
 for line in src.read_text().splitlines(True):
@@ -43,9 +43,9 @@ mli = ['''(** PostgreSQL SQLSTATE codes.
     failure, return 409 on a unique violation, 400 on a check violation.
 
     {[
-      match Sqlml.Error.sqlstate e with
-      | Some s when Sqlml.Sqlstate.is_retryable s -> retry ()
-      | Some s when Sqlml.Sqlstate.is_unique_violation s -> conflict ()
+      match Sqlkit.Error.sqlstate e with
+      | Some s when Sqlkit.Sqlstate.is_retryable s -> retry ()
+      | Some s when Sqlkit.Sqlstate.is_unique_violation s -> conflict ()
       | _ -> internal_error ()
     ]} *)
 
@@ -66,7 +66,7 @@ val name : t -> string
 type condition =''' % (len(ctors), len(cls))]
 for _, c, _, _ in ctors:
     mli.append("  | " + c)
-mli.append("  | Other of string  (** a code this version of sqlml does not know *)")
+mli.append("  | Other of string  (** a code this version of sqlkit does not know *)")
 mli.append('''
 val condition : t -> condition
 

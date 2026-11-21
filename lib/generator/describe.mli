@@ -41,7 +41,7 @@ val connect : string -> (Pq.conn, Diag.t) result
 val describe_all : Pq.conn -> Parse.t list -> (described list, Diag.t) result
 
 val report : described -> string
-(** Human-readable report for one query, as printed by [sqlml describe]. *)
+(** Human-readable report for one query, as printed by [sqlkit describe]. *)
 
 (** {1 Constructors}
 

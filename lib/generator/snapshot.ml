@@ -6,7 +6,7 @@
 open Gen_util
 
 let format_version = 2
-let filename = "sqlml.snapshot.json"
+let filename = "sqlkit.snapshot.json"
 let hash s = Digest.BLAKE256.to_hex (Digest.BLAKE256.string s)
 
 (* Every SQL text a query can execute, in bitmask order; the snapshot keys on
@@ -46,10 +46,7 @@ let json_of_column (c : Describe.column) =
   `Assoc
     [
       ("name", `String c.Describe.name);
-      ( "pg_type",
-        match Pg_type.to_json c.Describe.pg_type with
-        | `Assoc xs -> List.assoc "root" xs
-        | _ -> assert false );
+      ("pg_type", Pg_type.json_id c.Describe.pg_type.id);
       ("table", json_opt c.Describe.table);
       ("table_col", `Int c.Describe.table_col);
       ("typmod", `Int c.Describe.typmod);
@@ -60,10 +57,7 @@ let json_of_param (p : Describe.param) =
   `Assoc
     [
       ("pname", `String p.Describe.pname);
-      ( "pg_type",
-        match Pg_type.to_json p.Describe.pg_type with
-        | `Assoc xs -> List.assoc "root" xs
-        | _ -> assert false );
+      ("pg_type", Pg_type.json_id p.Describe.pg_type.id);
       ("pnullable", `Bool p.Describe.pnullable);
     ]
 
@@ -91,11 +85,7 @@ let write ~queries_dir ~config described =
         List.map (fun (c : Describe.column) -> c.pg_type) d.columns
         @ List.map (fun (p : Describe.param) -> p.pg_type) d.params)
       described
-    |> List.concat_map (fun t ->
-        match Pg_type.to_json t with
-        | `Assoc xs -> (
-            match List.assoc "types" xs with `List xs -> xs | _ -> assert false)
-        | _ -> assert false)
+    |> List.concat_map Pg_type.registry_json
     |> List.sort_uniq compare
   in
   let json =
@@ -148,8 +138,7 @@ let as_assoc = function
   | `Assoc kvs -> Ok kvs
   | _ -> Diag.error "snapshot: expected an object"
 
-let as_pg_type j =
-  try Ok (Pg_type.of_json j) with Invalid_argument m -> Diag.error "snapshot: %s" m
+let as_pg_type = Pg_type.of_json
 
 let entry_of_json registry json =
   let as_pg_type root = as_pg_type (`Assoc [ ("root", root); ("types", registry) ]) in
@@ -232,7 +221,8 @@ let entry_of_json registry json =
 let load ~queries_dir =
   let path = Filename.concat queries_dir filename in
   if not (Sys.file_exists path) then
-    Diag.error "no %s in %s -- run `sqlml snapshot` against a live database to create one"
+    Diag.error
+      "no %s in %s -- run `sqlkit snapshot` against a live database to create one"
       filename queries_dir
   else
     let* json =
@@ -247,7 +237,7 @@ let load ~queries_dir =
       | Some (`Int v) when v = format_version -> Ok ()
       | Some (`Int v) ->
           Diag.error ~file:path
-            "snapshot format v%d, this sqlml reads v%d -- re-run `sqlml snapshot`" v
+            "snapshot format v%d, this sqlkit reads v%d -- re-run `sqlkit snapshot`" v
             format_version
       | _ -> Diag.error ~file:path "snapshot: missing format_version"
     in
@@ -270,8 +260,8 @@ let describe_offline ~queries_dir ~config queries =
   let* () =
     if Config.schema config <> snap_files then
       Diag.error ~file:path
-        "snapshot was taken with schema files [%s] but sqlml.toml now lists [%s] -- \
-         re-run `sqlml snapshot`"
+        "snapshot was taken with schema files [%s] but sqlkit.toml now lists [%s] -- \
+         re-run `sqlkit snapshot`"
         (String.concat "; " snap_files)
         (String.concat "; " (Config.schema config))
     else Ok ()
@@ -280,7 +270,7 @@ let describe_offline ~queries_dir ~config queries =
     let* current = schema_hash ~queries_dir config in
     if current <> snap_hash then
       Diag.error ~file:path
-        "schema files changed since this snapshot was taken -- re-run `sqlml snapshot` \
+        "schema files changed since this snapshot was taken -- re-run `sqlkit snapshot` \
          against a database migrated to the current schema"
     else Ok ()
   in
@@ -293,10 +283,10 @@ let describe_offline ~queries_dir ~config queries =
           fmt
       in
       match List.assoc_opt q.Parse.name entries with
-      | None -> fail "not in the snapshot -- re-run `sqlml snapshot`"
+      | None -> fail "not in the snapshot -- re-run `sqlkit snapshot`"
       | Some e ->
           if List.map hash (variant_sqls q) <> e.e_variants then
-            fail "SQL changed since the snapshot was taken -- re-run `sqlml snapshot`"
+            fail "SQL changed since the snapshot was taken -- re-run `sqlkit snapshot`"
           else
             Ok
               (Describe.v_described ~query:q ~params:e.e_params ~columns:e.e_columns

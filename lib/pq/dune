@@ -4,7 +4,8 @@
 
 (library
  (name pq)
- (public_name sqlml-postgresql.pq)
+ (public_name sqlkit-postgresql.pq)
+ (libraries unix)
  (foreign_stubs
   (language c)
   (names pq_stubs)

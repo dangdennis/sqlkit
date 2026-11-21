@@ -21,7 +21,7 @@ let uuid s = Option.get (Uuidm.of_string s)
 
 (* Each handler borrows a connection for exactly as long as it needs one. *)
 let handle_signup pool ~id ~email ~display_name =
-  Sqlml_caqti.Pool.transaction pool @@ fun tx ->
+  Sqlkit_caqti.Pool.transaction pool @@ fun tx ->
   let* _ =
     create_user tx ~id ~organization_id:org ~email ~status:Active
       ~balance:(Decimal.of_string "0.00") ()
@@ -29,10 +29,10 @@ let handle_signup pool ~id ~email ~display_name =
   let* _ = set_display_name tx ~id ~display_name () in
   get_user tx ~id
 
-let handle_show pool ~id = Sqlml_caqti.Pool.use pool (fun conn -> get_user conn ~id)
+let handle_show pool ~id = Sqlkit_caqti.Pool.use pool (fun conn -> get_user conn ~id)
 
 let handle_roster pool =
-  Sqlml_caqti.Pool.use pool (fun conn ->
+  Sqlkit_caqti.Pool.use pool (fun conn ->
       search_users conn ~organization_id:org ~email_pattern:"%@web.example.com" ~limit:50L)
 
 (* ---------- driving it ---------- *)
@@ -48,28 +48,28 @@ let people =
 let unwrap what = function
   | Ok v -> v
   | Error e ->
-      Printf.printf "%s: %s\n" what (Sqlml.Error.to_string e);
+      Printf.printf "%s: %s\n" what (Sqlkit.Error.to_string e);
       incr failures;
       exit 1
 
 let () =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  let uri = Sqlml_caqti.uri_of_env () in
+  let uri = Sqlkit_caqti.uri_of_env () in
   let pool =
     match
-      Sqlml_caqti.Pool.create ~sw ~stdenv:(env :> Caqti_eio.stdenv) ~max_size:4 uri
+      Sqlkit_caqti.Pool.create ~sw ~stdenv:(env :> Caqti_eio.stdenv) ~max_size:4 uri
     with
     | Ok p -> p
     | Error e ->
-        prerr_endline (Sqlml.Error.to_string e);
+        prerr_endline (Sqlkit.Error.to_string e);
         exit 1
   in
   Printf.printf "pool     : up (max 4 connections)\n";
 
   (* clean slate *)
   List.iter
-    (fun (id, _, _) -> ignore (Sqlml_caqti.Pool.use pool (fun c -> delete_user c ~id)))
+    (fun (id, _, _) -> ignore (Sqlkit_caqti.Pool.use pool (fun c -> delete_user c ~id)))
     people;
 
   (* Four signups running concurrently, each on its own pooled connection, each
@@ -82,7 +82,7 @@ let () =
          | Ok None -> Printf.printf "signup   : %s vanished\n" email
          | Error e ->
              incr failures;
-             Printf.printf "signup   : %s failed: %s\n" email (Sqlml.Error.to_string e))
+             Printf.printf "signup   : %s failed: %s\n" email (Sqlkit.Error.to_string e))
        people);
 
   (* concurrent reads *)
@@ -112,16 +112,16 @@ let () =
       (* This is what a handler actually needs: not "it failed", but which
         constraint, so it can return 409 with a useful message instead of 500. *)
       let status =
-        match Sqlml.Error.sqlstate e with
-        | Some s when Sqlml.Sqlstate.is_unique_violation s -> "409 Conflict"
-        | Some s when Sqlml.Sqlstate.is_retryable s -> "retry"
+        match Sqlkit.Error.sqlstate e with
+        | Some s when Sqlkit.Sqlstate.is_unique_violation s -> "409 Conflict"
+        | Some s when Sqlkit.Sqlstate.is_retryable s -> "retry"
         | Some _ | None -> "500"
       in
       let still_works = unwrap "after-rollback" (handle_roster pool) in
       Printf.printf "duplicate: %s on %s (code %s); pool healthy (%d users)\n" status
-        (Option.value (Sqlml.Error.constraint_name e) ~default:"?")
-        (match Sqlml.Error.sqlstate e with
-        | Some s -> Sqlml.Sqlstate.to_string s
+        (Option.value (Sqlkit.Error.constraint_name e) ~default:"?")
+        (match Sqlkit.Error.sqlstate e with
+        | Some s -> Sqlkit.Sqlstate.to_string s
         | None -> "none")
         (List.length still_works));
 
@@ -129,11 +129,12 @@ let () =
   let tag_id = uuid "9c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f" in
   let tags = [ "a,b"; "plain"; "" ] in
   (match
-     Sqlml_caqti.Pool.use pool (fun c ->
+     Sqlkit_caqti.Pool.use pool (fun c ->
          let* _ =
-           put_tag_set c ~id:tag_id ~owner:org ~tags:(Sqlml.Pg_array.of_list tags)
-             ~scores:(Sqlml.Pg_array.of_list [ 7; 8 ])
-             ~states:(Sqlml.Pg_array.of_list [ Active ])
+           put_tag_set c ~id:tag_id ~owner:org
+             ~tags:(Sqlkit.Pg_array.of_list tags)
+             ~scores:(Sqlkit.Pg_array.of_list [ 7; 8 ])
+             ~states:(Sqlkit.Pg_array.of_list [ Active ])
              ~meta:(`Assoc [ ("k", `Int 1) ])
          in
          get_tag_set c ~id:tag_id)
@@ -141,26 +142,26 @@ let () =
   | Ok (Some t) ->
       if
         not
-          (Sqlml.Pg_array.to_list (Option.get t.tags) = tags
-          && Sqlml.Pg_array.to_list (Option.get t.scores) = [ 7; 8 ]
-          && Sqlml.Pg_array.to_list (Option.get t.states) = [ Active ])
+          (Sqlkit.Pg_array.to_list_exn (Option.get t.tags) = tags
+          && Sqlkit.Pg_array.to_list_exn (Option.get t.scores) = [ 7; 8 ]
+          && Sqlkit.Pg_array.to_list_exn (Option.get t.states) = [ Active ])
       then incr failures;
       Printf.printf "arrays   : tags=%b scores=%b states=%b\n"
-        (Sqlml.Pg_array.to_list (Option.get t.tags) = tags)
-        (Sqlml.Pg_array.to_list (Option.get t.scores) = [ 7; 8 ])
-        (Sqlml.Pg_array.to_list (Option.get t.states) = [ Active ])
+        (Sqlkit.Pg_array.to_list_exn (Option.get t.tags) = tags)
+        (Sqlkit.Pg_array.to_list_exn (Option.get t.scores) = [ 7; 8 ])
+        (Sqlkit.Pg_array.to_list_exn (Option.get t.states) = [ Active ])
   | Ok None ->
       incr failures;
       print_endline "arrays   : missing"
   | Error e ->
       incr failures;
-      Printf.printf "arrays   : %s\n" (Sqlml.Error.to_string e));
+      Printf.printf "arrays   : %s\n" (Sqlkit.Error.to_string e));
 
   (* streaming through the Caqti driver: DECLARE/FETCH ride the same Driver.S
      operations, so the pool needs nothing special *)
   (match
-     Sqlml_caqti.Pool.use pool (fun c ->
-         Sqlml.fetch_fold
+     Sqlkit_caqti.Pool.use pool (fun c ->
+         Sqlkit.fetch_fold
            (module Search_users)
            ~batch:2 c
            {
@@ -172,20 +173,20 @@ let () =
            ~f:(fun n _ -> n + 1))
    with
   | Ok n -> Printf.printf "stream   : %d row(s) in batches of 2\n" n
-  | Error e -> Printf.printf "stream   : %s\n" (Sqlml.Error.to_string e));
+  | Error e -> Printf.printf "stream   : %s\n" (Sqlkit.Error.to_string e));
 
   (* jsonb ? operator through the Caqti driver: this used to be re-parsed by
      Caqti's placeholder grammar and misread as a parameter *)
-  (match Sqlml_caqti.Pool.use pool (fun c -> has_meta_key c ~key:"k") with
+  (match Sqlkit_caqti.Pool.use pool (fun c -> has_meta_key c ~key:"k") with
   | Ok rows -> Printf.printf "jsonb ?  : %d row(s) with key\n" (List.length rows)
   | Error e ->
       incr failures;
-      Printf.printf "jsonb ?  : %s\n" (Sqlml.Error.to_string e));
+      Printf.printf "jsonb ?  : %s\n" (Sqlkit.Error.to_string e));
 
   (* COPY is libpq-only by design; the Caqti driver must say so clearly
      rather than fail obscurely *)
   (match
-     Sqlml_caqti.Pool.use pool (fun c ->
+     Sqlkit_caqti.Pool.use pool (fun c ->
          bulk_add_users c
            [
              {
@@ -199,7 +200,7 @@ let () =
            ])
    with
   | Error e ->
-      let m = Sqlml.Error.to_string e in
+      let m = Sqlkit.Error.to_string e in
       let says_libpq =
         let rec go i =
           i + 5 <= String.length m && (String.sub m i 5 = "libpq" || go (i + 1))
@@ -213,15 +214,42 @@ let () =
       print_endline "copy     : unexpectedly succeeded on Caqti");
 
   List.iter
-    (fun (id, _, _) -> ignore (Sqlml_caqti.Pool.use pool (fun c -> delete_user c ~id)))
+    (fun (id, _, _) -> ignore (Sqlkit_caqti.Pool.use pool (fun c -> delete_user c ~id)))
     people;
   ignore
     (unwrap "compiler codecs"
-       (Sqlml_caqti.Pool.use pool (fun conn ->
+       (Sqlkit_caqti.Pool.use pool (fun conn ->
             Compiler_checks.run ~id:902
               ~check:(fun what ok ->
                 Printf.printf "%s: %b\n" what ok;
                 if not ok then incr failures)
               conn;
             Ok ())));
+  let cancelled =
+    match
+      Eio.Cancel.sub (fun cc ->
+          Sqlkit_caqti.Pool.transaction pool (fun tx ->
+              let* _ =
+                create_user tx
+                  ~id:(uuid "0b000000-0000-4000-8000-0000000000f1")
+                  ~organization_id:org ~email:"cancelled@web.example.com" ~status:Active
+                  ~balance:(Decimal.of_string "0") ()
+              in
+              Eio.Cancel.cancel cc Exit;
+              Eio.Cancel.check cc;
+              Ok ()))
+    with
+    | exception Eio.Cancel.Cancelled _ -> true
+    | _ -> false
+  in
+  let gone =
+    match
+      Sqlkit_caqti.Pool.use pool (fun c ->
+          get_user c ~id:(uuid "0b000000-0000-4000-8000-0000000000f1"))
+    with
+    | Ok None -> true
+    | _ -> false
+  in
+  Printf.printf "cancellation propagates and rolls back: %b\n" (cancelled && gone);
+  if not (cancelled && gone) then incr failures;
   if !failures > 0 then exit 1

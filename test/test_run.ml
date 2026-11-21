@@ -6,7 +6,7 @@ let check what b =
     Printf.printf "FAIL %s\n" what;
     exit 1)
 
-open Sqlml_gen
+open Sqlkit_gen
 
 let mkdir d = try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
 
@@ -17,7 +17,7 @@ let write path contents =
 
 let () =
   (* ---------- discovery ---------- *)
-  let root = Filename.temp_file "sqlml_disc" "" in
+  let root = Filename.temp_file "sqlkit_disc" "" in
   Sys.remove root;
   mkdir root;
   mkdir (Filename.concat root "sub");

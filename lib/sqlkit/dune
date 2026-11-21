@@ -1,0 +1,9 @@
+; Core runtime. Depends only on pure data libraries for the richer Postgres
+; type mappings -- deliberately NO Caqti and NO Eio. The backend boundary lives
+; in Sqlkit.Driver, and adapters implement it. That is what keeps Caqti out of
+; generated code's public signatures.
+
+(library
+ (name sqlkit)
+ (public_name sqlkit)
+ (libraries ptime uuidm decimal yojson))

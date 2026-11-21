@@ -1,0 +1,8 @@
+; Everything about the protocol that needs no socket: message layout,
+; authentication arithmetic, connection strings. Separate so it can be tested
+; and fuzzed without a server.
+
+(library
+ (name pgwire_protocol)
+ (public_name sqlkit-pgwire.protocol)
+ (libraries sqlkit digestif base64 eqaf uri))

@@ -288,19 +288,18 @@ let build_dynamic ~file ~line segs =
   else begin
     let nvariants = 1 lsl nblocks in
     let variants = Array.make nvariants ("", []) in
-    let bad = ref None in
-    (try
-       for mask = 0 to nvariants - 1 do
-         match assemble ~file ~line segs mask with
-         | Ok v -> variants.(mask) <- v
-         | Error e ->
-             bad := Some e;
-             raise Exit
-       done
-     with Exit -> ());
-    match !bad with
-    | Some e -> Error e
-    | None -> (
+    let rec fill mask =
+      if mask = nvariants then Ok ()
+      else
+        match assemble ~file ~line segs mask with
+        | Error e -> Error e
+        | Ok v ->
+            variants.(mask) <- v;
+            fill (mask + 1)
+    in
+    match fill 0 with
+    | Error e -> Error e
+    | Ok () -> (
         let base_names = names (snd variants.(0)) in
         let block_params = Array.make nblocks [] in
         let problem = ref None in

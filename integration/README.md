@@ -6,17 +6,17 @@ transaction and rolls back afterwards; existing schemas with those names cause
 an error. pGenie creates and drops its own temporary analysis databases.
 
 ```sh
-export DATABASE_URL=postgresql://sqlml:sqlml@127.0.0.1:55432/sqlml_inference
-dune exec integration/inference.exe -- --cases 1000 --output /tmp/sqlml-inference
-python3 integration/compile_corpus.py /tmp/sqlml-inference
-python3 integration/install_pgenie.py /tmp/sqlml-pgenie
-python3 integration/differential.py /tmp/sqlml-inference --pgn /tmp/sqlml-pgenie/pgn
+export DATABASE_URL=postgresql://sqlkit:sqlkit@127.0.0.1:55432/sqlkit_inference
+dune exec integration/inference.exe -- --cases 1000 --output /tmp/sqlkit-inference
+python3 integration/compile_corpus.py /tmp/sqlkit-inference
+python3 integration/install_pgenie.py /tmp/sqlkit-pgenie
+python3 integration/differential.py /tmp/sqlkit-inference --pgn /tmp/sqlkit-pgenie/pgn
 ```
 
 Use the same OCaml toolchain for dune and `ocamlfind`. With the opam workflow,
 run commands under `opam exec`; `--pkg=disabled` disables dune package management.
 For an alternate build directory, pass it to both dune and `compile_corpus.py`.
-The ordinary build must produce `lib/sqlml/sqlml.cma` before compiling the corpus.
+The ordinary build must produce `lib/sqlkit/sqlkit.cma` before compiling the corpus.
 
 ## Coverage and assertions
 
@@ -36,7 +36,8 @@ enumeration of every valid SQL program.
 Each case is independently prepared/described, compared with raw catalog reads,
 and executed. The runner writes generated `corpus.ml`/`.mli` and decoder checks
 containing PostgreSQL's exact returned rows. The compilation stage checks emitted
-OCaml types and executes those decoders. Failed decoding fails the gate.
+OCaml types and executes those decoders, including two schema-qualified composites
+with identical field names and different field types. Failed decoding fails the gate.
 
 The independent PostgreSQL checks include schema/type identity, recursive kinds,
 enum order, domain constraints, array delimiters, composite fields/order, range
@@ -51,9 +52,9 @@ Supported installation targets: Linux x64 and macOS arm64.
 
 The JSON analysis model is the normalized input to pGenie's generators. Comparison
 checks parameter/result identity and order plus enum/composite definitions.
-Nullability precision is recorded separately: sqlml defaults to optional, while
+Nullability precision is recorded separately: sqlkit defaults to optional, while
 pGenie may infer non-null. Array identity is compared without treating pGenie's
-inferred dimension count as a restriction on sqlml's runtime dimensions.
+inferred dimension count as a restriction on sqlkit's runtime dimensions.
 
 Observed limitations of that release are explicit exclusions **only from pGenie**:
 
@@ -62,7 +63,7 @@ Observed limitations of that release are explicit exclusions **only from pGenie*
 - Dropped composite attributes: the dropped field reaches inference as OID 0.
 
 pGenie rejects normalized same-name custom types from different schemas in one
-project. Cases are split by schema for comparison; PostgreSQL and sqlml still see
+project. Cases are split by schema for comparison; PostgreSQL and sqlkit still see
 them together. Batches of 50 bound pGenie's connection fan-out. None of these
 exclusions remove cases from the PostgreSQL or compiled-decoder gates.
 

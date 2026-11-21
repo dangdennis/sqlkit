@@ -1,0 +1,4 @@
+(library
+ (name sqlkit_pool_eio)
+ (public_name sqlkit-pool-eio)
+ (libraries sqlkit eio mtime))

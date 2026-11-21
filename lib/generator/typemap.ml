@@ -17,7 +17,7 @@ type t =
   | Time_of_day
   | Interval
   | Enum of string * string list (* ocaml type name, labels in sort order *)
-  | Custom of custom (* from sqlml.toml *)
+  | Custom of custom (* from sqlkit.toml *)
   | Array of t * char
   | Composite of string
   | Range of t
@@ -37,106 +37,114 @@ let rec ocaml_type = function
   | Json -> "Yojson.Safe.t"
   | Date -> "Ptime.date"
   | Time_of_day -> "Ptime.Span.t"
-  | Interval -> "Sqlml.Interval.t"
+  | Interval -> "Sqlkit.Interval.t"
   | Enum (n, _) -> n
   | Custom c -> c.c_ocaml
-  | Array (t, _) -> "(" ^ ocaml_type t ^ ") Sqlml.Pg_array.t"
+  | Array (t, _) -> "(" ^ ocaml_type t ^ ") Sqlkit.Pg_array.t"
   | Composite n -> n
-  | Range t -> "(" ^ ocaml_type t ^ ") Sqlml.Range.t"
-  | Multirange t -> "(" ^ ocaml_type t ^ ") Sqlml.Range.t list"
+  | Range t -> "(" ^ ocaml_type t ^ ") Sqlkit.Range.t"
+  | Multirange t -> "(" ^ ocaml_type t ^ ") Sqlkit.Range.t list"
   | Option t -> ocaml_type t ^ " option"
 
-(* A function of type [Sqlml.Row.t -> int -> _] *)
+(* A function of type [Sqlkit.Row.t -> int -> _] *)
 let rec decoder = function
-  | Int -> "Sqlml.Row.int"
-  | Int64 -> "Sqlml.Row.int64"
-  | Float -> "Sqlml.Row.float"
-  | Bool -> "Sqlml.Row.bool"
-  | String -> "Sqlml.Row.string"
-  | Bytes -> "Sqlml.Row.octets"
-  | Uuid -> "Sqlml.Row.uuid"
-  | Ptime -> "Sqlml.Row.ptime"
-  | Decimal -> "Sqlml.Row.decimal"
-  | Json -> "Sqlml.Row.json"
-  | Date -> "Sqlml.Row.date"
-  | Time_of_day -> "Sqlml.Row.time_of_day"
-  | Interval -> "Sqlml.Row.interval"
+  | Int -> "Sqlkit.Row.int"
+  | Int64 -> "Sqlkit.Row.int64"
+  | Float -> "Sqlkit.Row.float"
+  | Bool -> "Sqlkit.Row.bool"
+  | String -> "Sqlkit.Row.string"
+  | Bytes -> "Sqlkit.Row.octets"
+  | Uuid -> "Sqlkit.Row.uuid"
+  | Ptime -> "Sqlkit.Row.ptime"
+  | Decimal -> "Sqlkit.Row.decimal"
+  | Json -> "Sqlkit.Row.json"
+  | Date -> "Sqlkit.Row.date"
+  | Time_of_day -> "Sqlkit.Row.time_of_day"
+  | Interval -> "Sqlkit.Row.interval"
   | Enum (n, _) -> n ^ "_of_row"
-  | Custom c -> Printf.sprintf "(Sqlml.Row.custom %s)" c.c_of_string
+  | Custom c -> Printf.sprintf "(Sqlkit.Row.custom %s)" c.c_of_string
   | (Array _ | Composite _ | Range _ | Multirange _) as t ->
-      Printf.sprintf "(Sqlml.Row.custom %s)" (elem_parser t)
-  | Option t -> Printf.sprintf "(Sqlml.Row.option %s)" (decoder t)
+      Printf.sprintf "(Sqlkit.Row.custom %s)" (elem_parser t)
+  | Option t -> Printf.sprintf "(Sqlkit.Row.option %s)" (decoder t)
 
 (* Array elements arrive as raw text, so they need [string -> _] parsers rather
    than the row-indexing decoders above. *)
 and elem_parser = function
-  | Int -> "Sqlml.Row.Elem.int"
-  | Int64 -> "Sqlml.Row.Elem.int64"
-  | Float -> "Sqlml.Row.Elem.float"
-  | Bool -> "Sqlml.Row.Elem.bool"
-  | String -> "Sqlml.Row.Elem.string"
-  | Bytes -> "Sqlml.Row.Elem.octets"
-  | Uuid -> "Sqlml.Row.Elem.uuid"
-  | Ptime -> "Sqlml.Row.Elem.ptime"
-  | Decimal -> "Sqlml.Row.Elem.decimal"
-  | Json -> "Sqlml.Row.Elem.json"
-  | Date -> "Sqlml.Row.Elem.date"
-  | Time_of_day -> "Sqlml.Row.Elem.time_of_day"
-  | Interval -> "Sqlml.Row.Elem.interval"
+  | Int -> "Sqlkit.Row.Elem.int"
+  | Int64 -> "Sqlkit.Row.Elem.int64"
+  | Float -> "Sqlkit.Row.Elem.float"
+  | Bool -> "Sqlkit.Row.Elem.bool"
+  | String -> "Sqlkit.Row.Elem.string"
+  | Bytes -> "Sqlkit.Row.Elem.octets"
+  | Uuid -> "Sqlkit.Row.Elem.uuid"
+  | Ptime -> "Sqlkit.Row.Elem.ptime"
+  | Decimal -> "Sqlkit.Row.Elem.decimal"
+  | Json -> "Sqlkit.Row.Elem.json"
+  | Date -> "Sqlkit.Row.Elem.date"
+  | Time_of_day -> "Sqlkit.Row.Elem.time_of_day"
+  | Interval -> "Sqlkit.Row.Elem.interval"
   | Enum (n, _) -> n ^ "_of_string"
   | Custom c -> c.c_of_string
   | Array (t, delimiter) ->
-      Printf.sprintf "(Sqlml.Pg_array.of_string ~delimiter:%C %s)" delimiter
+      Printf.sprintf "(Sqlkit.Pg_array.of_string ~delimiter:%C %s)" delimiter
         (elem_parser t)
   | Composite n -> n ^ "_of_string"
-  | Range t -> Printf.sprintf "(Sqlml.Range.of_string %s)" (elem_parser t)
-  | Multirange t -> Printf.sprintf "(Sqlml.Range.multirange_of_string %s)" (elem_parser t)
+  | Range t -> Printf.sprintf "(Sqlkit.Range.of_string %s)" (elem_parser t)
+  | Multirange t ->
+      Printf.sprintf "(Sqlkit.Range.multirange_of_string %s)" (elem_parser t)
   | Option t -> elem_parser t
 
-(* A function of type [_ -> Sqlml.Value.t] *)
-let rec encoder = function
-  | Int -> "Sqlml.Value.of_int"
-  | Int64 -> "Sqlml.Value.of_int64"
-  | Float -> "Sqlml.Value.of_float"
-  | Bool -> "Sqlml.Value.of_bool"
-  | String -> "Sqlml.Value.of_string"
-  | Bytes -> "Sqlml.Value.of_octets"
-  | Uuid -> "Sqlml.Value.of_uuid"
-  | Ptime -> "Sqlml.Value.of_ptime"
-  | Decimal -> "Sqlml.Value.of_decimal"
-  | Json -> "Sqlml.Value.of_json"
-  | Date -> "Sqlml.Value.of_date"
-  | Time_of_day -> "Sqlml.Value.of_time_of_day"
-  | Interval -> "Sqlml.Value.of_interval"
-  | Enum (n, _) -> n ^ "_to_value"
-  | Custom c -> Printf.sprintf "(fun x -> Sqlml.Value.of_string (%s x))" c.c_to_string
+(* A function of type [_ -> Sqlkit.Value.t] *)
+let rec encoder t =
+  match t with
+  | Int -> "(fun x -> Ok (Sqlkit.Value.of_int x))"
+  | Int64 -> "(fun x -> Ok (Sqlkit.Value.of_int64 x))"
+  | Float -> "(fun x -> Ok (Sqlkit.Value.of_float x))"
+  | Bool -> "(fun x -> Ok (Sqlkit.Value.of_bool x))"
+  | String -> "(fun x -> Ok (Sqlkit.Value.of_string x))"
+  | Bytes -> "(fun x -> Ok (Sqlkit.Value.of_octets x))"
+  | Uuid -> "(fun x -> Ok (Sqlkit.Value.of_uuid x))"
+  | Ptime -> "(fun x -> Ok (Sqlkit.Value.of_ptime x))"
+  | Decimal -> "(fun x -> Ok (Sqlkit.Value.of_decimal x))"
+  | Json -> "(fun x -> Ok (Sqlkit.Value.of_json x))"
+  | Date -> "(fun x -> Ok (Sqlkit.Value.of_date x))"
+  | Time_of_day -> "(fun x -> Ok (Sqlkit.Value.of_time_of_day x))"
+  | Interval -> "(fun x -> Ok (Sqlkit.Value.of_interval x))"
+  | Enum (n, _) -> "(fun x -> Ok (" ^ n ^ "_to_value x))"
+  | Custom c ->
+      Printf.sprintf "(fun x -> Result.map Sqlkit.Value.of_string (%s x))" c.c_to_string
   | (Array _ | Composite _ | Range _ | Multirange _) as t ->
-      Printf.sprintf "(fun x -> Sqlml.Value.of_string (%s x))" (elem_printer t)
-  | Option t -> Printf.sprintf "(Sqlml.Value.of_option %s)" (encoder t)
+      Printf.sprintf "(fun x -> Result.map Sqlkit.Value.of_string (%s x))"
+        (elem_printer t)
+  | Option t ->
+      Printf.sprintf
+        "(fun x -> match x with None -> Ok Sqlkit.Value.Null | Some x -> %s x)"
+        (encoder t)
 
 and elem_printer = function
-  | Int -> "Sqlml.Value.Print.int"
-  | Int64 -> "Sqlml.Value.Print.int64"
-  | Float -> "Sqlml.Value.Print.float"
-  | Bool -> "Sqlml.Value.Print.bool"
-  | String -> "Sqlml.Value.Print.string"
-  | Bytes -> "Sqlml.Value.Print.octets"
-  | Uuid -> "Sqlml.Value.Print.uuid"
-  | Ptime -> "Sqlml.Value.Print.ptime"
-  | Decimal -> "Sqlml.Value.Print.decimal"
-  | Json -> "Sqlml.Value.Print.json"
-  | Date -> "Sqlml.Value.Print.date"
-  | Time_of_day -> "Sqlml.Value.Print.time_of_day"
-  | Interval -> "Sqlml.Value.Print.interval"
-  | Enum (n, _) -> n ^ "_to_string"
-  | Custom c -> c.c_to_string
+  | Int -> "(fun x -> Ok (Sqlkit.Value.Print.int x))"
+  | Int64 -> "(fun x -> Ok (Sqlkit.Value.Print.int64 x))"
+  | Float -> "(fun x -> Ok (Sqlkit.Value.Print.float x))"
+  | Bool -> "(fun x -> Ok (Sqlkit.Value.Print.bool x))"
+  | String -> "Sqlkit.Codec.text"
+  | Bytes -> "(fun x -> Ok (Sqlkit.Value.Print.octets x))"
+  | Uuid -> "(fun x -> Ok (Sqlkit.Value.Print.uuid x))"
+  | Ptime -> "(fun x -> Ok (Sqlkit.Value.Print.ptime x))"
+  | Decimal -> "(fun x -> Ok (Sqlkit.Value.Print.decimal x))"
+  | Json -> "(fun x -> Ok (Sqlkit.Value.Print.json x))"
+  | Date -> "(fun x -> Ok (Sqlkit.Value.Print.date x))"
+  | Time_of_day -> "(fun x -> Ok (Sqlkit.Value.Print.time_of_day x))"
+  | Interval -> "(fun x -> Ok (Sqlkit.Value.Print.interval x))"
+  | Enum (n, _) -> "(fun x -> Ok (" ^ n ^ "_to_string x))"
+  | Custom c ->
+      Printf.sprintf "(fun x -> Result.bind (%s x) Sqlkit.Codec.text)" c.c_to_string
   | Array (t, delimiter) ->
-      Printf.sprintf "(Sqlml.Pg_array.to_string ~delimiter:%C %s)" delimiter
+      Printf.sprintf "(Sqlkit.Pg_array.to_string ~delimiter:%C %s)" delimiter
         (elem_printer t)
   | Composite n -> n ^ "_to_string"
-  | Range t -> Printf.sprintf "(Sqlml.Range.to_string %s)" (elem_printer t)
+  | Range t -> Printf.sprintf "(Sqlkit.Range.to_string %s)" (elem_printer t)
   | Multirange t ->
-      Printf.sprintf "(Sqlml.Range.multirange_to_string %s)" (elem_printer t)
+      Printf.sprintf "(Sqlkit.Range.multirange_to_string %s)" (elem_printer t)
   | Option t -> elem_printer t
 
 let is_option = function Option _ -> true | _ -> false

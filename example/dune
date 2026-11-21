@@ -1,10 +1,22 @@
 (executables
- (names e2e app web)
- (modules e2e app web compiler_checks)
+ (names e2e app web pgwire_checks soak)
+ (modules
+  e2e
+  app
+  web
+  compiler_checks
+  production_checks
+  interval_checks
+  eio_checks
+  pgwire_checks
+  soak)
  (libraries
-  sqlml
-  sqlml_pg
-  sqlml_caqti
+  sqlkit
+  sqlkit_pg
+  sqlkit_caqti
+  sqlkit_eio
+  sqlkit_pgwire
+  unix
   generated
   ptime
   uuidm

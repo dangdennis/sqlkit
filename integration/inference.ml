@@ -1,6 +1,6 @@
 (* The oracle uses an independently prepared statement and raw catalog queries.
    It deliberately does not call Pg_type.discover to compute expected identities. *)
-open Sqlml_gen
+open Sqlkit_gen
 
 let get = function Ok x -> x | Error e -> failwith (Diag.to_string e)
 let pq = function Ok x -> x | Error (e : Pq.diag) -> failwith e.message
@@ -236,18 +236,21 @@ let case conn ~seed ~output ~checks i =
         d.columns);
   Pq.with_result
     (pq
-       (Pq.check
-          (Pq.exec_params conn q.sql (Array.make (List.length q.params) (Some "1")))))
+       (Result.bind
+          (Pq.exec_params conn q.sql (Array.make (List.length q.params) (Some "1")))
+          Pq.check))
     (fun r ->
       check "execution type shape" (Pq.nfields r = List.length d.columns);
       for row = 0 to Pq.ntuples r - 1 do
         let values =
           List.init (Pq.nfields r) (fun j ->
-              if Pq.getisnull r row j then "Sqlml.Value.Null"
-              else Printf.sprintf "Sqlml.Value.Text %S" (Pq.getvalue r row j))
+              if Pq.getisnull r row j then "Sqlkit.Value.Null"
+              else Printf.sprintf "Sqlkit.Value.Text %S" (Pq.getvalue r row j))
         in
-        Printf.bprintf checks "let () = ignore (Corpus.%s.decode [|%s|])\n" q.module_name
-          (String.concat ";" values)
+        Printf.bprintf checks
+          "let () = match Corpus.%s.decode [|%s|] with Ok _ -> () | Error e -> failwith \
+           (Sqlkit.Row.to_string e)\n"
+          q.module_name (String.concat ";" values)
       done;
       List.iteri
         (fun j (c : Describe.column) ->
@@ -288,12 +291,37 @@ let case conn ~seed ~output ~checks i =
   output_string output (Yojson.Safe.to_string contract ^ "\n");
   d
 
-let regressions conn out =
+let regressions conn out checks =
   let parse sql =
     match get (Parse.of_string ~file:"regression.sql" sql) with
     | [ q ] -> q
     | _ -> assert false
   in
+  exec conn
+    "CREATE TYPE compiler_a.same_fields AS (value int); CREATE TYPE \
+     compiler_b.same_fields AS (value text)";
+  let twins =
+    parse
+      "-- name: Twins :one!\n\
+       SELECT ROW(1)::compiler_a.same_fields AS a, ROW('x')::compiler_b.same_fields AS b"
+  in
+  let ds = get (Describe.describe_all conn [ twins ]) in
+  let mli, ml = get (Emit.generate ~src:"same_fields" ds) in
+  write (Filename.concat out "same_fields.mli") mli;
+  write (Filename.concat out "same_fields.ml") ml;
+  let rows = pq (Pq.query conn twins.sql) in
+  List.iter
+    (fun row ->
+      let values =
+        Array.to_list row
+        |> List.map (Printf.sprintf "Sqlkit.Value.Text %S")
+        |> String.concat ";"
+      in
+      Printf.bprintf checks
+        "let () = match Same_fields.Twins.decode [|%s|] with Ok _ -> () | Error _ -> \
+         failwith \"same-field composite decoding\"\n"
+        values)
+    rows;
   exec conn "DEALLOCATE ALL";
   let variant =
     parse "-- name: Drift :many\nSELECT (:x /*? + :b::bigint */)::numeric AS value"
@@ -338,7 +366,7 @@ let regressions conn out =
 let () =
   let described = ref [] and checks = Buffer.create 4096 in
   let single = ref (-1) in
-  let count = ref 1000 and seed = ref 0 and out = ref "/tmp/sqlml-inference" in
+  let count = ref 1000 and seed = ref 0 and out = ref "/tmp/sqlkit-inference" in
   Arg.parse
     [
       ("--case", Arg.Set_int single, "replay a single case");
@@ -373,7 +401,7 @@ let () =
                     ("postgres", json_string version.(0));
                     ("pgenie", json_string "0.15.0");
                   ]));
-          regressions conn !out;
+          regressions conn !out checks;
           Out_channel.with_open_bin (Filename.concat !out "contracts.jsonl")
             (fun output ->
               for

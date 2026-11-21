@@ -26,11 +26,19 @@ let rec json_sorted : Yojson.Safe.t -> Yojson.Safe.t = function
 let id = uuid "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
 let org = uuid "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 
-let conn =
-  match Sqlml_pg.connect (Sqlml_pg.conninfo_of_env ()) with
+(* `--driver eio` (libpq's async API) and `--driver pgwire` (pure OCaml) run the
+   same sections on one connection inside an Eio loop. The default is the
+   blocking libpq driver. *)
+let driver, argv =
+  match Array.to_list Sys.argv with
+  | exe :: "--driver" :: (("eio" | "pgwire" | "libpq") as d) :: rest ->
+      (d, Array.of_list (exe :: rest))
+  | args -> ("libpq", Array.of_list args)
+
+let connected = function
   | Ok c -> c
   | Error e ->
-      prerr_endline (Sqlml.Error.to_string e);
+      prerr_endline (Sqlkit.Error.to_string e);
       exit 1
 
 let test_crud conn =
@@ -41,7 +49,7 @@ let test_crud conn =
     (Db.create_user_exn conn ~id ~organization_id:org ~email:"e2e@example.com"
        ~status:Db.Active ~balance:(Decimal.of_string "42.50") ~display_name:"End To End"
        ()
-    = 1);
+    = Some 1);
 
   (* :one, round-tripping every interesting type through the wire *)
   (match Db.get_user_exn conn ~id with
@@ -72,7 +80,7 @@ let test_crud conn =
        found);
 
   (* omitting the optional argument must write a real NULL *)
-  check "update" (Db.set_display_name_exn conn ~id () = 1);
+  check "update" (Db.set_display_name_exn conn ~id () = Some 1);
   (match Db.get_user_exn conn ~id with
   | Some u -> check "omitted optional -> NULL -> None" (u.Db.name = None)
   | None -> check "omitted optional -> NULL -> None" false);
@@ -91,7 +99,7 @@ let test_crud conn =
       check "! override gives a plain int" (r.Db.post_count = 0L)
   | None -> check "LEFT JOIN row present" false);
 
-  check "delete" (Db.delete_user_exn conn ~id = 1);
+  check "delete" (Db.delete_user_exn conn ~id = Some 1);
   check "deleted row is gone" (Db.get_user_exn conn ~id = None);
   ()
 
@@ -104,34 +112,34 @@ let test_transactions conn =
 
   (* commits when the body returns Ok *)
   (match
-     Sqlml.transaction conn (fun tx -> Ok (insert tx ~email:"committed@example.com"))
+     Sqlkit.transaction conn (fun tx -> Ok (insert tx ~email:"committed@example.com"))
    with
-  | Ok 1 -> check "transaction commits" (Db.get_user_exn conn ~id <> None)
+  | Ok (Some 1) -> check "transaction commits" (Db.get_user_exn conn ~id <> None)
   | _ -> check "transaction commits" false);
   ignore (Db.delete_user_exn conn ~id);
 
   (* rolls back when the body returns Error *)
   (match
-     Sqlml.transaction conn (fun tx ->
+     Sqlkit.transaction conn (fun tx ->
          ignore (insert tx ~email:"rolled-back@example.com");
-         Error (Sqlml.Error.Connect "deliberate"))
+         Error (Sqlkit.Error.Connect "deliberate"))
    with
   | Error _ -> check "Error rolls back" (Db.get_user_exn conn ~id = None)
   | Ok _ -> check "Error rolls back" false);
 
-  (* rolls back when the body raises, and re-raises *)
+  (* rolls back when the body raises, returning a callback error *)
   (match
-     Sqlml.transaction conn (fun tx ->
+     Sqlkit.transaction conn (fun tx ->
          ignore (insert tx ~email:"raised@example.com");
          failwith "boom")
    with
-  | exception Failure _ ->
-      check "raise rolls back and re-raises" (Db.get_user_exn conn ~id = None)
-  | _ -> check "raise rolls back and re-raises" false);
+  | Error (Sqlkit.Error.Callback _) ->
+      check "callback error rolls back" (Db.get_user_exn conn ~id = None)
+  | _ -> check "callback error rolls back" false);
 
   (* generated functions work unchanged inside a transaction *)
   (match
-     Sqlml.transaction conn (fun tx ->
+     Sqlkit.transaction conn (fun tx ->
          ignore (insert tx ~email:"in-tx@example.com");
          match Db.get_user tx ~id with Ok u -> Ok u | Error e -> Error e)
    with
@@ -154,20 +162,20 @@ let test_arrays conn =
   let meta = Yojson.Safe.from_string {|{"nested":{"a":[1,2,null]},"s":"x"}|} in
   check "array insert"
     (Db.put_tag_set_exn conn ~id:tag_id ~owner:org
-       ~tags:(Sqlml.Pg_array.of_list tricky)
-       ~scores:(Sqlml.Pg_array.of_list [ 1; -2; 30 ])
-       ~states:(Sqlml.Pg_array.of_list [ Db.Active; Db.Banned; Db.Active ])
+       ~tags:(Sqlkit.Pg_array.of_list tricky)
+       ~scores:(Sqlkit.Pg_array.of_list [ 1; -2; 30 ])
+       ~states:(Sqlkit.Pg_array.of_list [ Db.Active; Db.Banned; Db.Active ])
        ~meta
-    = 1);
+    = Some 1);
   (match Db.get_tag_set_exn conn ~id:tag_id with
   | None -> check "array round-trip" false
   | Some t ->
       check "text[] round-trips exactly"
-        (Sqlml.Pg_array.to_list (Option.get t.Db.tags) = tricky);
+        (Sqlkit.Pg_array.to_list_exn (Option.get t.Db.tags) = tricky);
       check "int[] round-trips"
-        (Sqlml.Pg_array.to_list (Option.get t.Db.scores) = [ 1; -2; 30 ]);
+        (Sqlkit.Pg_array.to_list_exn (Option.get t.Db.scores) = [ 1; -2; 30 ]);
       check "enum[] decodes to variants"
-        (Sqlml.Pg_array.to_list (Option.get t.Db.states)
+        (Sqlkit.Pg_array.to_list_exn (Option.get t.Db.states)
         = [ Db.Active; Db.Banned; Db.Active ]);
       check "jsonb round-trips (structurally)"
         (json_sorted (Option.get t.Db.meta) = json_sorted meta));
@@ -175,14 +183,14 @@ let test_arrays conn =
   (* empty arrays are not the same as NULL *)
   let empty_id = uuid "8b2c3d4e-5f6a-4b7c-9d0e-1f2a3b4c5d6e" in
   ignore
-    (Db.put_tag_set_exn conn ~id:empty_id ~owner:org ~tags:(Sqlml.Pg_array.of_list [])
-       ~scores:(Sqlml.Pg_array.of_list []) ~states:(Sqlml.Pg_array.of_list [])
+    (Db.put_tag_set_exn conn ~id:empty_id ~owner:org ~tags:(Sqlkit.Pg_array.of_list [])
+       ~scores:(Sqlkit.Pg_array.of_list []) ~states:(Sqlkit.Pg_array.of_list [])
        ~meta:(`Assoc []));
   (match Db.get_tag_set_exn conn ~id:empty_id with
   | Some t ->
       check "empty array round-trips"
-        (Sqlml.Pg_array.to_list (Option.get t.Db.tags) = []
-        && Sqlml.Pg_array.to_list (Option.get t.Db.scores) = [])
+        (Sqlkit.Pg_array.to_list_exn (Option.get t.Db.tags) = []
+        && Sqlkit.Pg_array.to_list_exn (Option.get t.Db.scores) = [])
   | None -> check "empty array round-trips" false);
 
   (* an array parameter: = ANY(...) as a dynamic IN list *)
@@ -194,16 +202,16 @@ let test_arrays conn =
         (Db.create_user_exn conn ~id:i ~organization_id:org ~email:e ~status:Db.Active
            ~balance:(Decimal.of_string "0.00") ()))
     [ (a, "any-a@example.com"); (b, "any-b@example.com") ];
-  let found = Db.get_users_by_ids_exn conn ~ids:(Sqlml.Pg_array.of_list [ a; b ]) in
+  let found = Db.get_users_by_ids_exn conn ~ids:(Sqlkit.Pg_array.of_list [ a; b ]) in
   check "= ANY(array param) matches both" (List.length found = 2);
   check "= ANY with empty array returns nothing"
-    (Db.get_users_by_ids_exn conn ~ids:(Sqlml.Pg_array.of_list []) = []);
+    (Db.get_users_by_ids_exn conn ~ids:(Sqlkit.Pg_array.of_list []) = []);
   List.iter (fun i -> ignore (Db.delete_user_exn conn ~id:i)) [ a; b ];
   ()
 
 let test_sqlstate conn =
   (* ---------- SQLSTATE ---------- *)
-  let sqlstate_of r = match r with Error e -> Sqlml.Error.sqlstate e | Ok _ -> None in
+  let sqlstate_of r = match r with Error e -> Sqlkit.Error.sqlstate e | Ok _ -> None in
   let a2 = uuid "aaaaaaaa-0000-4000-8000-000000000001" in
   ignore
     (Db.create_user_exn conn ~id:a2 ~organization_id:org ~email:"dup@example.com"
@@ -218,28 +226,28 @@ let test_sqlstate conn =
   in
   (match sqlstate_of dup with
   | Some s ->
-      check "unique violation is 23505" (Sqlml.Sqlstate.to_string s = "23505");
-      check "named unique_violation" (Sqlml.Sqlstate.name s = "unique_violation");
+      check "unique violation is 23505" (Sqlkit.Sqlstate.to_string s = "23505");
+      check "named unique_violation" (Sqlkit.Sqlstate.name s = "unique_violation");
       check "condition matches"
-        (Sqlml.Sqlstate.condition s = Sqlml.Sqlstate.Unique_violation);
-      check "classified as integrity" (Sqlml.Sqlstate.is_integrity_violation s);
-      check "not retryable" (not (Sqlml.Sqlstate.is_retryable s));
+        (Sqlkit.Sqlstate.condition s = Sqlkit.Sqlstate.Unique_violation);
+      check "classified as integrity" (Sqlkit.Sqlstate.is_integrity_violation s);
+      check "not retryable" (not (Sqlkit.Sqlstate.is_retryable s));
       check "class is 23"
-        (Sqlml.Sqlstate.class_ s = Sqlml.Sqlstate.Class.Integrity_constraint_violation)
+        (Sqlkit.Sqlstate.class_ s = Sqlkit.Sqlstate.Class.Integrity_constraint_violation)
   | None -> check "unique violation reports a sqlstate" false);
   (match dup with
   | Error e ->
       check "constraint name is reported"
-        (Sqlml.Error.constraint_name e = Some "users_email_key");
-      check "Error.is_unique_violation" (Sqlml.Error.is_unique_violation e)
+        (Sqlkit.Error.constraint_name e = Some "users_email_key");
+      check "Error.is_unique_violation" (Sqlkit.Error.is_unique_violation e)
   | Ok _ -> check "duplicate insert failed" false);
 
   (* foreign key violation: a post whose author does not exist *)
   let fk =
     Db.put_tag_set conn
       ~id:(uuid "bbbbbbbb-0000-4000-8000-000000000001")
-      ~owner:org ~tags:(Sqlml.Pg_array.of_list []) ~scores:(Sqlml.Pg_array.of_list [])
-      ~states:(Sqlml.Pg_array.of_list []) ~meta:(`Assoc [])
+      ~owner:org ~tags:(Sqlkit.Pg_array.of_list []) ~scores:(Sqlkit.Pg_array.of_list [])
+      ~states:(Sqlkit.Pg_array.of_list []) ~meta:(`Assoc [])
   in
   ignore fk;
   ignore (Db.delete_user_exn conn ~id:a2);
@@ -256,16 +264,16 @@ let test_nesting_savepoints conn =
   in
   List.iter (fun i -> ignore (Db.delete_user_exn conn ~id:i)) [ n1; n2; n3 ];
   (match
-     Sqlml.transaction conn (fun tx ->
+     Sqlkit.transaction conn (fun tx ->
          match mk tx n1 "outer-a@example.com" with
          | Error e -> Error e
          | Ok _ ->
              (* inner failure must roll back only the inner insert *)
              (match
-                Sqlml.transaction tx (fun inner ->
+                Sqlkit.transaction tx (fun inner ->
                     match mk inner n2 "inner@example.com" with
                     | Error e -> Error e
-                    | Ok _ -> Error (Sqlml.Error.Connect "abort inner"))
+                    | Ok _ -> Error (Sqlkit.Error.Connect "abort inner"))
               with
              | Ok _ -> ()
              | Error _ -> ());
@@ -276,17 +284,18 @@ let test_nesting_savepoints conn =
       check "inner work rolled back" (Db.get_user_exn conn ~id:n2 = None);
       check "outer continues after inner rollback" (Db.get_user_exn conn ~id:n3 <> None)
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "nested transaction" false);
   List.iter (fun i -> ignore (Db.delete_user_exn conn ~id:i)) [ n1; n3 ];
 
   (* isolation inside an enclosing transaction is a programming error *)
   (match
-     Sqlml.transaction conn (fun tx ->
-         Sqlml.transaction ~isolation:`Serializable tx (fun _ -> Ok ()))
+     Sqlkit.transaction conn (fun tx ->
+         Sqlkit.transaction ~isolation:`Serializable tx (fun _ -> Ok ()))
    with
-  | exception Invalid_argument _ -> check "nested ~isolation raises Invalid_argument" true
-  | _ -> check "nested ~isolation raises Invalid_argument" false);
+  | Error (Sqlkit.Error.Invalid_argument _) ->
+      check "nested isolation returns an argument error" true
+  | _ -> check "nested isolation returns an argument error" false);
   ()
 
 let test_retry_a_real_serialization_failure conn =
@@ -302,20 +311,20 @@ let test_retry_a_real_serialization_failure conn =
     (Db.create_user_exn conn ~id:victim ~organization_id:org ~email:"racer@example.com"
        ~status:Db.Active ~balance:(Decimal.of_string "0.00") ());
   let conn2 =
-    match Sqlml_pg.connect (Sqlml_pg.conninfo_of_env ()) with
+    match Sqlkit_pg.connect (Sqlkit_pg.conninfo_of_env ()) with
     | Ok c -> c
     | Error e ->
-        print_endline (Sqlml.Error.to_string e);
+        print_endline (Sqlkit.Error.to_string e);
         exit 1
   in
   let attempts = ref 0 in
   (match
-     Sqlml.transaction ~isolation:`Repeatable_read ~retry:2 conn (fun tx ->
+     Sqlkit.transaction ~isolation:`Repeatable_read ~retry:2 conn (fun tx ->
          incr attempts;
          (* take the snapshot *)
          match Db.get_user tx ~id:victim with
          | Error e -> Error e
-         | Ok None -> Error (Sqlml.Error.Connect "victim vanished")
+         | Ok None -> Error (Sqlkit.Error.Connect "victim vanished")
          | Ok (Some _) ->
              (* on the first attempt only, interfere from the second connection *)
              if !attempts = 1 then
@@ -332,7 +341,7 @@ let test_retry_a_real_serialization_failure conn =
         | Some u -> u.Db.name = Some "attempt-2"
         | None -> false)
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "serialization failure retried" false);
   ignore (Db.delete_user_exn conn ~id:victim);
   ()
@@ -351,7 +360,7 @@ let test_one conn =
   | Error _ -> check ":one! returns the row unwrapped" false);
   ignore (Db.delete_user_exn conn ~id:s1);
   (match Db.get_user_strict conn ~id:s1 with
-  | Error (Sqlml.Error.Cardinality { expected = "exactly 1"; got = 0; _ }) ->
+  | Error (Sqlkit.Error.Cardinality { expected = "exactly 1"; got = 0; _ }) ->
       check ":one! absence is a Cardinality error" true
   | _ -> check ":one! absence is a Cardinality error" false);
   ()
@@ -374,7 +383,7 @@ let test_streaming conn =
 
   (* batch 2 over 5 rows forces three FETCHes, so batching is actually exercised *)
   (match
-     Sqlml.fetch_fold
+     Sqlkit.fetch_fold
        (module Db.Search_users)
        ~batch:2 conn
        { Db.Search_users.organization_id = org; email_pattern = "stream-%"; limit = 100L }
@@ -383,13 +392,13 @@ let test_streaming conn =
    with
   | Ok n -> check "fetch_fold sees all rows across batches" (n = 5)
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "fetch_fold sees all rows across batches" false);
 
   (* streaming inside an enclosing transaction: the cursor nests via savepoint *)
   (match
-     Sqlml.transaction conn (fun tx ->
-         Sqlml.fetch_fold
+     Sqlkit.transaction conn (fun tx ->
+         Sqlkit.fetch_fold
            (module Db.Search_users)
            ~batch:2 tx
            {
@@ -402,7 +411,7 @@ let test_streaming conn =
    with
   | Ok emails -> check "streaming inside a transaction" (List.length emails = 5)
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "streaming inside a transaction" false);
 
   List.iter (fun id -> ignore (Db.delete_user_exn conn ~id)) ids;
@@ -418,14 +427,14 @@ let test_statement_cache_vs_rollback conn =
      never-before-used query inside a rolled-back transaction, then again
      outside. *)
   ignore
-    (Sqlml.transaction conn (fun tx ->
+    (Sqlkit.transaction conn (fun tx ->
          match Db.count_users_by_status tx with
-         | Ok _ -> Error (Sqlml.Error.Connect "deliberate rollback")
+         | Ok _ -> Error (Sqlkit.Error.Connect "deliberate rollback")
          | Error e -> Error e));
   (match Db.count_users_by_status conn with
   | Ok _ -> check "prepared stmt survives rollback of its first use" true
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "prepared stmt survives rollback of its first use" false);
 
   (* and the plain repeated-use path: same statement, three executions *)
@@ -463,7 +472,7 @@ let test_optional_blocks conn =
                && String.sub (Option.get r.Db.email) 0 4 = "dyn-")
              rows)
     | Error e ->
-        print_endline (Sqlml.Error.to_string e);
+        print_endline (Sqlkit.Error.to_string e);
         -1
   in
   check "no filters -> all 3" (count () = 3);
@@ -484,7 +493,7 @@ let test_date_time_interval conn =
     Option.get (Ptime.Span.of_float_s ((14. *. 3600.) +. (30. *. 60.) +. 5.25))
   in
   let duration =
-    Sqlml.Interval.make ~years:1 ~months:2 ~days:3 ~hours:4 ~minutes:5 ~seconds:6 ()
+    Sqlkit.Interval.make_exn ~years:1 ~months:2 ~days:3 ~hours:4 ~minutes:5 ~seconds:6 ()
   in
   ignore (Db.put_booking_exn conn ~id:bk ~on_date:(2026, 7, 30) ~at_time ~duration);
   (match Db.get_booking conn ~id:bk with
@@ -493,21 +502,21 @@ let test_date_time_interval conn =
       check "time round-trips to the microsecond"
         (Ptime.Span.equal (Option.get b.Db.at_time) at_time);
       check "interval round-trips (postgres style out)"
-        (Sqlml.Interval.equal (Option.get b.Db.duration) duration)
+        (Sqlkit.Interval.equal (Option.get b.Db.duration) duration)
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "date/time/interval round-trip" false);
 
   (* a negative mixed interval, which postgres prints with interior signs *)
-  let weird = Sqlml.Interval.make ~months:(-1) ~days:2 ~hours:(-3) () in
+  let weird = Sqlkit.Interval.make_exn ~months:(-1) ~days:2 ~hours:(-3) () in
   ignore (Db.put_booking_exn conn ~id:bk ~on_date:(2024, 2, 29) ~at_time ~duration:weird);
   (match Db.get_booking conn ~id:bk with
   | Ok b ->
       check "leap-day date" (Option.get b.Db.on_date = (2024, 2, 29));
       check "negative mixed interval round-trips"
-        (Sqlml.Interval.equal (Option.get b.Db.duration) weird)
+        (Sqlkit.Interval.equal (Option.get b.Db.duration) weird)
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "negative interval round-trip" false);
   ()
 
@@ -540,7 +549,7 @@ let test_copy conn =
   (match Db.bulk_add_users conn rows with
   | Ok n -> check "copy reports every row written" (n = total)
   | Error e ->
-      print_endline (Sqlml.Error.to_string e);
+      print_endline (Sqlkit.Error.to_string e);
       check "copy reports every row written" false);
   check "count agrees" ((Db.count_users_by_org_exn conn ~org).Db.n = Int64.of_int total);
   (* the hostile cells round-trip byte-for-byte *)
@@ -556,7 +565,7 @@ let test_copy conn =
   (* all-or-nothing: one duplicate id aborts the whole load, and the
      connection remains usable *)
   (match Db.bulk_add_users conn [ List.hd rows ] with
-  | Error e -> check "bad copy aborts with sqlstate" (Sqlml.Error.sqlstate e <> None)
+  | Error e -> check "bad copy aborts with sqlstate" (Sqlkit.Error.sqlstate e <> None)
   | Ok _ -> check "bad copy aborts with sqlstate" false);
   check "count unchanged after failed copy"
     ((Db.count_users_by_org_exn conn ~org).Db.n = Int64.of_int total);
@@ -577,13 +586,14 @@ let sections =
     ("date_time_interval", test_date_time_interval);
     ("copy", test_copy);
     ("compiler", Compiler_checks.run ~copy:true ~check ~id:901);
+    ("production", Production_checks.run ~check);
   ]
 
 (* Each section runs under a try so one crash still lets the rest report; a
    section is also runnable alone (--section crud) when chasing a failure. *)
-let () =
+let run sections conn =
   let only =
-    match Sys.argv with
+    match argv with
     | [| _; "--section"; s |] ->
         if not (List.mem_assoc s sections) then begin
           Printf.printf "no section %S; sections are:\n" s;
@@ -593,7 +603,7 @@ let () =
         Some s
     | [| _ |] -> None
     | _ ->
-        prerr_endline "usage: e2e [--section NAME]";
+        prerr_endline "usage: e2e [--driver libpq|eio|pgwire] [--section NAME]";
         exit 2
   in
   List.iter
@@ -605,7 +615,57 @@ let () =
           Printf.printf "FAIL %s raised %s\n" name (Printexc.to_string e);
           incr failures
       end)
-    sections;
+    sections
+
+let eio_driver env : (module Eio_checks.DRIVER) =
+  let clock = env#mono_clock and net = env#net in
+  if driver = "pgwire" then
+    (module struct
+      let conninfo = Sqlkit_pgwire.conninfo_of_env
+
+      let connect ~sw ?connect_timeout ?observe conninfo =
+        Sqlkit_pgwire.connect ~sw ~net ~clock ?connect_timeout ?observe conninfo
+
+      module Pool = struct
+        include Sqlkit_pgwire.Pool
+
+        let create ~sw ?max_size ?acquire_timeout ?query_timeout ?limits ?observe conninfo
+            =
+          create ~sw ~net ~clock ?max_size ?acquire_timeout ?query_timeout ?limits
+            ?observe conninfo
+      end
+    end)
+  else
+    (module struct
+      let conninfo = Sqlkit_eio.conninfo_of_env
+
+      let connect ~sw ?connect_timeout ?observe conninfo =
+        Sqlkit_eio.connect ~sw ~clock ?connect_timeout ?observe conninfo
+
+      module Pool = struct
+        include Sqlkit_eio.Pool
+
+        let create ~sw ?max_size ?acquire_timeout ?query_timeout ?limits ?observe conninfo
+            =
+          create ~sw ~clock ?max_size ?acquire_timeout ?query_timeout ?limits ?observe
+            conninfo
+      end
+    end)
+
+let () =
+  if driver = "libpq" then
+    run sections (connected (Sqlkit_pg.connect (Sqlkit_pg.conninfo_of_env ())))
+  else
+    Eio_main.run (fun env ->
+        Eio.Switch.run (fun sw ->
+            let (module D) = eio_driver env in
+            (* The production section drives the libpq and Caqti drivers and
+               starts its own Eio loop; eio_checks.ml is its counterpart here. *)
+            let sections =
+              List.filter (fun (name, _) -> name <> "production") sections
+              @ [ ("eio", Eio_checks.run (module D) ~check ~env ~sw) ]
+            in
+            run sections (connected (D.connect ~sw (D.conninfo ())))));
   if !failures = 0 then print_endline "all good"
   else begin
     Printf.printf "%d failure(s)\n" !failures;

@@ -1,11 +1,27 @@
+(vendored_dirs vendor)
+
+(include_subdirs unqualified)
+
 (library
- (name sqlml_caqti)
- (public_name sqlml-caqti)
+ (name sqlkit_caqti)
+ (public_name sqlkit-caqti)
  (libraries
-  sqlml
+  sqlkit
   caqti
   caqti.classic
   caqti-eio
   caqti-eio.unix
-  caqti-driver-postgresql
-  uri))
+  caqti.platform
+  caqti.platform.unix
+  postgresql
+  uri
+  mtime))
+
+(install
+ (section doc)
+ (package sqlkit-caqti)
+ (files
+  vendor/COPYING
+  vendor/COPYING.LESSER
+  vendor/COPYING.LINKING
+  (vendor/README.md as caqti-compatibility.md)))

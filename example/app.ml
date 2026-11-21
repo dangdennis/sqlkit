@@ -14,14 +14,14 @@ let failures = ref 0
 
 let fail_with e =
   incr failures;
-  Sqlml.Error.to_string e
+  Sqlkit.Error.to_string e
 
 (* ---------- a service layer ---------- *)
 
 (* Signing up is two statements that must land together, so it goes in a
    transaction. Generated functions take the transaction handle unchanged. *)
 let signup conn ~id ~email ~display_name =
-  Sqlml.transaction conn @@ fun tx ->
+  Sqlkit.transaction conn @@ fun tx ->
   let* _ =
     create_user tx ~id ~organization_id:org ~email ~status:Active
       ~balance:(Decimal.of_string "0.00") ()
@@ -30,7 +30,7 @@ let signup conn ~id ~email ~display_name =
   get_user tx ~id
 
 (* A caller that genuinely cannot proceed on failure uses the _exn variant and
-   lets Sqlml.Sql_error propagate. *)
+   lets Sqlkit.Sql_error propagate. *)
 let describe conn ~id =
   match get_user_exn conn ~id with
   | None -> Printf.sprintf "user %s: not found" (Uuidm.to_string id)
@@ -60,10 +60,10 @@ let ghost = Option.get (Uuidm.of_string "00000000-0000-4000-8000-000000000000")
 
 let () =
   let conn =
-    match Sqlml_pg.connect (Sqlml_pg.conninfo_of_env ()) with
+    match Sqlkit_pg.connect (Sqlkit_pg.conninfo_of_env ()) with
     | Ok c -> c
     | Error e ->
-        prerr_endline (Sqlml.Error.to_string e);
+        prerr_endline (Sqlkit.Error.to_string e);
         exit 1
   in
   List.iter (fun id -> ignore (delete_user_exn conn ~id)) [ alice; bob ];

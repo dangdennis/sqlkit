@@ -14,7 +14,7 @@ let rec fold_result f acc = function
   | x :: tl -> ( match f acc x with Ok acc -> fold_result f acc tl | Error _ as e -> e)
 
 (* OCaml reserved words: a column alias or query name that lands on one would
-   emit uncompilable code with no diagnostic from sqlml. *)
+   emit uncompilable code with no diagnostic from sqlkit. *)
 let ocaml_keywords =
   [
     "and";

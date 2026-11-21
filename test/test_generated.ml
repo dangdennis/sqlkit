@@ -16,11 +16,14 @@ let contains hay needle =
   go 0
 
 let uuid_s = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
-let ts = Sqlml.Value.Text "2026-07-28 09:00:00+00"
+let ts = Sqlkit.Value.Text "2026-07-28 09:00:00+00"
 
 module Stub = struct
-  type conn = { mutable last_params : Sqlml.Value.t list }
+  type conn = { mutable last_params : Sqlkit.Value.t list }
 
+  let now _ = 0.
+  let is_cancellation _ = false
+  let with_cleanup = Fun.protect
   let close _ = ()
 
   let query c ~sql ~params ~columns:_ =
@@ -30,44 +33,44 @@ module Stub = struct
       Ok
         [
           [|
-            Sqlml.Value.Text uuid_s;
-            Sqlml.Value.Text uuid_s;
-            Sqlml.Value.Text "dennis@example.com";
-            Sqlml.Value.Null;
-            Sqlml.Value.Text "banned";
-            Sqlml.Value.Text "1234.50";
+            Sqlkit.Value.Text uuid_s;
+            Sqlkit.Value.Text uuid_s;
+            Sqlkit.Value.Text "dennis@example.com";
+            Sqlkit.Value.Null;
+            Sqlkit.Value.Text "banned";
+            Sqlkit.Value.Text "1234.50";
             ts;
           |];
         ]
     else if contains sql "post_count" then
       Ok
         [
-          [| Sqlml.Value.Text "a@b.c"; Sqlml.Value.Null; Sqlml.Value.Int 0 |];
-          [| Sqlml.Value.Text "c@d.e"; Sqlml.Value.Text "Hello"; Sqlml.Value.Int 3 |];
+          [| Sqlkit.Value.Text "a@b.c"; Sqlkit.Value.Null; Sqlkit.Value.Int 0 |];
+          [| Sqlkit.Value.Text "c@d.e"; Sqlkit.Value.Text "Hello"; Sqlkit.Value.Int 3 |];
         ]
     else if contains sql "display_name" then
       Ok
         [
           [|
-            Sqlml.Value.Text uuid_s;
-            Sqlml.Value.Text "dennis@example.com";
-            Sqlml.Value.Text "Dennis";
-            Sqlml.Value.Text "active";
-            Sqlml.Value.Text "1234.50";
+            Sqlkit.Value.Text uuid_s;
+            Sqlkit.Value.Text "dennis@example.com";
+            Sqlkit.Value.Text "Dennis";
+            Sqlkit.Value.Text "active";
+            Sqlkit.Value.Text "1234.50";
             ts;
           |];
         ]
-    else Ok [ [| Sqlml.Value.Text uuid_s; Sqlml.Value.Text "x@y.z"; ts |] ]
+    else Ok [ [| Sqlkit.Value.Text uuid_s; Sqlkit.Value.Text "x@y.z"; ts |] ]
 
   let exec c ~sql:_ ~params =
     c.last_params <- params;
-    Ok 1
+    Ok (Some 1)
 
   let copy _ ~sql:_ ~rows = Ok (List.length rows)
 end
 
 let state = { Stub.last_params = [] }
-let conn = Sqlml.Driver.make (module Stub) state
+let conn = Sqlkit.Driver.make (module Stub) state
 let uuid = Option.get (Uuidm.of_string uuid_s)
 
 let () =
@@ -96,25 +99,45 @@ let () =
   check "! override -> non-option" ((List.nth rows 1).Db.post_count = 3L);
 
   (* :exec *)
-  check "exec returns count" (Db.delete_user_exn conn ~id:uuid = 1);
+  check "exec returns count" (Db.delete_user_exn conn ~id:uuid = Some 1);
 
   (* optional argument omitted -> NULL reaches the driver *)
   ignore (Db.set_display_name_exn conn ~id:uuid ());
   check "omitted optional encodes NULL"
-    (match state.Stub.last_params with Sqlml.Value.Null :: _ -> true | _ -> false);
+    (match state.Stub.last_params with Sqlkit.Value.Null :: _ -> true | _ -> false);
 
   (* optional argument supplied *)
   ignore (Db.set_display_name_exn conn ~id:uuid ~display_name:"Dennis" ());
   check "supplied optional encodes Text"
     (match state.Stub.last_params with
-    | Sqlml.Value.Text "Dennis" :: _ -> true
+    | Sqlkit.Value.Text "Dennis" :: _ -> true
     | _ -> false);
 
   (* encoders: uuid goes out as text *)
   ignore (Db.get_user conn ~id:uuid);
   check "uuid encodes"
     (match state.Stub.last_params with
-    | [ Sqlml.Value.Text s ] -> s = uuid_s
+    | [ Sqlkit.Value.Text s ] -> s = uuid_s
     | _ -> false);
 
+  state.last_params <- [ Sqlkit.Value.Text "untouched" ];
+  check "partial optional block returns error"
+    (match Db.optional_bounds conn ~lo:1 () with
+    | Error (Sqlkit.Error.Encode _) -> true
+    | _ -> false);
+  check "invalid selection does not execute"
+    (state.last_params = [ Sqlkit.Value.Text "untouched" ]);
+  check "invalid custom codec returns decode error"
+    (Result.is_error (Db.Get_user.decode [| Sqlkit.Value.Text "invalid uuid" |]));
+  check "invalid enum returns decode error"
+    (Result.is_error
+       (Db.Get_user.decode
+          [|
+            Sqlkit.Value.Text uuid_s;
+            Sqlkit.Value.Text "a";
+            Sqlkit.Value.Null;
+            Sqlkit.Value.Text "unknown";
+            Sqlkit.Value.Text "1";
+            ts;
+          |]));
   print_endline "all good"

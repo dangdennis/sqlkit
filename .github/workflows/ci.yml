@@ -52,19 +52,19 @@ jobs:
       postgres:
         image: postgres:18
         env:
-          POSTGRES_USER: sqlml
-          POSTGRES_PASSWORD: sqlml
-          POSTGRES_DB: sqlml
+          POSTGRES_USER: sqlkit
+          POSTGRES_PASSWORD: sqlkit
+          POSTGRES_DB: sqlkit
         ports:
           - 55432:5432
         options: >-
-          --health-cmd "pg_isready -U sqlml -d sqlml"
+          --health-cmd "pg_isready -U sqlkit -d sqlkit"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
 
     env:
-      DATABASE_URL: postgresql://sqlml:sqlml@127.0.0.1:55432/sqlml
+      DATABASE_URL: postgresql://sqlkit:sqlkit@127.0.0.1:55432/sqlkit
 
     steps:
       - uses: actions/checkout@v4
@@ -96,13 +96,13 @@ jobs:
       # on anything unattached (example/, test-only libs) fails here, not on an
       # opam consumer's machine.
       - name: Packages build in isolation
-        run: opam exec -- dune build -p sqlml,sqlml-postgresql,sqlml-caqti @install
+        run: opam exec -- dune build -p sqlkit,sqlkit-postgresql,sqlkit-caqti @install
 
       - name: Unit tests (no database)
         run: opam exec -- dune test
 
       - name: Load schema
-        run: PGPASSWORD=sqlml psql -h 127.0.0.1 -p 55432 -U sqlml -d sqlml -f example/schema.sql
+        run: PGPASSWORD=sqlkit psql -h 127.0.0.1 -p 55432 -U sqlkit -d sqlkit -f example/schema.sql
 
       - name: End-to-end (libpq driver)
         run: opam exec -- dune exec example/e2e.exe
@@ -112,7 +112,7 @@ jobs:
           opam exec -- dune exec example/app.exe
           opam exec -- dune exec example/web.exe
 
-      - name: Generated code is current (sqlml check)
+      - name: Generated code is current (sqlkit check)
         run: opam exec -- dune exec bin/main.exe -- check -q example/sql -o example/generated
 
       # Same check through the committed snapshot: DATABASE_URL is cleared so
@@ -123,17 +123,17 @@ jobs:
       - name: Snapshot is current
         run: |
           opam exec -- dune exec bin/main.exe -- snapshot -q example/sql
-          git diff --exit-code example/sql/sqlml.snapshot.json
+          git diff --exit-code example/sql/sqlkit.snapshot.json
 
       - name: Install pinned differential oracle
         run: python3 integration/install_pgenie.py "$RUNNER_TEMP/pgenie"
 
       - name: Compiler corpus and compiled decoders
         env:
-          DATABASE_URL: postgresql://sqlml:sqlml@127.0.0.1:55432/sqlml_inference
+          DATABASE_URL: postgresql://sqlkit:sqlkit@127.0.0.1:55432/sqlkit_inference
           EXTENDED: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
-          PGPASSWORD=sqlml createdb -h 127.0.0.1 -p 55432 -U sqlml sqlml_inference
+          PGPASSWORD=sqlkit createdb -h 127.0.0.1 -p 55432 -U sqlkit sqlkit_inference
           cases=1000
           if [ "$EXTENDED" = true ]; then cases=10000; fi
           opam exec -- dune exec integration/inference.exe -- --cases "$cases" --output "$RUNNER_TEMP/inference"
