@@ -266,9 +266,20 @@ let parse s =
         match get "user" (Some "PGUSER") with
         | Some u -> Ok u
         | None -> (
-            match env "USER" with
+            (* As libpq does: the account the process runs as. Containers
+               often have no USER in the environment. *)
+            match
+              List.find_map Fun.id
+                [
+                  env "USER";
+                  env "LOGNAME";
+                  (try Some (Unix.getpwuid (Unix.getuid ())).Unix.pw_name
+                   with Not_found | Unix.Unix_error _ -> None);
+                ]
+            with
             | Some u -> Ok u
-            | None -> Error "no user in connection string, PGUSER or USER")
+            | None -> Error "no user in the connection string, PGUSER, or the environment"
+            )
       in
       let* mode =
         match get "sslmode" (Some "PGSSLMODE") with

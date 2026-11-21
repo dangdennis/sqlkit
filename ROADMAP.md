@@ -278,6 +278,11 @@ Production testing (2026-11-21), each runnable from `example/`:
   out of upstream support and reject interval literals whose time part is
   longer than about 35 minutes.
 
+- A COMMIT that the server answers with ROLLBACK (the transaction had already
+  failed) is an error in the libpq, Eio and pgwire drivers, not a success.
+  Only statements with a plan worth keeping are prepared by name; transaction
+  control never is.
+
 Still open:
 
 - Binary result format, in both drivers and the runtime's decoders.

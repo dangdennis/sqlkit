@@ -415,6 +415,14 @@ CAMLprim value sqlkit_pq_conn_is_null(value conn)
   return Val_bool(Nativeint_val(conn) == 0);
 }
 
+/* The command tag: "INSERT 0 1", "COMMIT", "ROLLBACK". */
+CAMLprim value sqlkit_pq_cmd_status(value res)
+{
+  CAMLparam1(res);
+  const char *s = PQcmdStatus(Res_val(res));
+  CAMLreturn(caml_copy_string(s == NULL ? "" : s));
+}
+
 CAMLprim value sqlkit_pq_connect_poll(value conn)
 {
   return Val_int((int)PQconnectPoll(Conn_val(conn)));

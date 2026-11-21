@@ -105,7 +105,21 @@ module Raw = struct
     else
       match Result.bind (run conn sql params) Pq.check with
       | Error e -> Error (of_diag e)
-      | Ok r -> Pq.with_result r (fun r -> Ok (int_of_string_opt (Pq.cmd_tuples_text r)))
+      | Ok r ->
+          Pq.with_result r (fun r ->
+              (* COMMIT in a failed transaction is answered with success and
+                 the tag ROLLBACK; to a caller that is a commit that never
+                 happened. *)
+              let word =
+                String.lowercase_ascii (String.trim sql)
+                |> String.split_on_char ' ' |> List.hd
+              in
+              if (word = "commit" || word = "end") && Pq.cmd_status r = "ROLLBACK" then
+                Error
+                  (Sqlkit.Driver.error
+                     ~sqlstate:(Sqlkit.Sqlstate.of_string "25P02")
+                     "ERROR:  COMMIT rolled back: the transaction had already failed")
+              else Ok (int_of_string_opt (Pq.cmd_tuples_text r)))
 
   (* COPY skips the prepared-statement cache: COPY cannot be prepared, and the
      conversation is one shot by nature. *)

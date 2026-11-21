@@ -191,6 +191,7 @@ let conninfo_of_env () =
         | Some p when p <> "" -> " password=" ^ p
         | _ -> "")
 
+external cmd_status : res -> string = "sqlkit_pq_cmd_status"
 external fmod : res -> int -> int = "sqlkit_pq_fmod"
 external monotonic_time : unit -> float = "sqlkit_monotonic_time"
 external connect_timeout : string -> int -> conn = "sqlkit_pq_connect_timeout"

@@ -102,6 +102,55 @@ let () =
         (label ^ ": with the cache off everything succeeds, in transactions too")
         (match r with 80, 0, 0 -> true | _ -> false))
     [ (56432, "no prepared-statement support"); (56433, "max_prepared_statements") ];
+  (* No commit may be acknowledged and then turn out not to have happened. *)
+  ignore (exec admin "DROP TABLE IF EXISTS pooler_commits");
+  ignore (exec admin "CREATE TABLE pooler_commits (id text PRIMARY KEY)");
+  List.iter
+    (fun (port, label) ->
+      let clients = List.init 6 (fun _ -> connect port) in
+      let acknowledged = ref [] and attempts = ref 0 in
+      for round = 1 to 30 do
+        List.iteri
+          (fun who conn ->
+            incr attempts;
+            let id = Printf.sprintf "%d-%d-%d" port who round in
+            let ok r = match r with Ok _ -> true | Error _ -> false in
+            let began = ok (exec conn "BEGIN") in
+            let inserted =
+              began
+              && ok
+                   (query conn "INSERT INTO pooler_commits VALUES ($1) RETURNING id"
+                      [ text id ])
+            in
+            if inserted && ok (exec conn "COMMIT") then
+              acknowledged := id :: !acknowledged
+            else ignore (exec conn "ROLLBACK"))
+          clients
+      done;
+      let present =
+        match
+          query admin "SELECT id FROM pooler_commits WHERE id LIKE $1"
+            [ text (string_of_int port ^ "-%") ]
+        with
+        | Ok rows ->
+            List.filter_map
+              (function [| Sqlkit.Value.Text id |] -> Some id | _ -> None)
+              rows
+        | Error _ -> []
+      in
+      Printf.printf "     %s: %d of %d transactions acknowledged, %d rows present\n%!"
+        label (List.length !acknowledged) !attempts (List.length present);
+      check
+        (label ^ ": every acknowledged commit is in the table, and nothing else is")
+        (List.sort compare !acknowledged = List.sort compare present);
+      check
+        (label ^ ": most transactions went through")
+        (List.length !acknowledged > !attempts / 2))
+    [
+      (56432, "commits, no prepared-statement support");
+      (56433, "commits, max_prepared_statements");
+    ];
+  ignore (exec admin "DROP TABLE pooler_commits");
   (* Many fibers through a pool, more clients than the bouncer has backends. *)
   List.iter
     (fun (port, statement_cache, label) ->
