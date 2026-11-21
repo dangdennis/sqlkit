@@ -1,5 +1,5 @@
 (executables
- (names e2e app web pgwire_checks soak)
+ (names e2e app web pgwire_checks soak chaos differential pooler_checks)
  (modules
   e2e
   app
@@ -9,7 +9,10 @@
   interval_checks
   eio_checks
   pgwire_checks
-  soak)
+  soak
+  chaos
+  differential
+  pooler_checks)
  (libraries
   sqlkit
   sqlkit_pg

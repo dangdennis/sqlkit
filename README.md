@@ -440,6 +440,9 @@ A missing or mismatched `ocamlformat` is an error.
 
 ## Development
 
+sqlkit supports PostgreSQL 15 and later. Older servers are not refused, but nothing
+is tested against them.
+
 ```
 docker compose up -d     # PostgreSQL 18 on 127.0.0.1:55432
 dune build               # dune package management: fetches deps from dune.lock

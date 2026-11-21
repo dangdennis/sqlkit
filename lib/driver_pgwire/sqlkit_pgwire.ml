@@ -39,7 +39,8 @@ module Raw = struct
     mutable received : int;
     mutable busy : bool;
     stmts : (string, string) Hashtbl.t;
-    mutable counter : int;
+    statement_cache : bool;
+    mutable generation : int;
     mutable transaction : Wire.transaction;
     mutable broken : bool;
     mutable closed : bool;
@@ -151,38 +152,81 @@ module Raw = struct
     | None -> Rows (List.rev rows, Option.bind tag Wire.affected)
 
   (* Returns the statement's reply and whether a cached plan produced it. *)
-  let attempt c ~sql ~args =
+  (* A statement's name is a digest of its text, not a counter. Behind a
+     pooler in transaction mode one backend serves many clients; with counters
+     two clients would both call their first statement "s1", and the second
+     would execute the first one's SQL and get its rows back with no error.
+     With a digest, a name that already exists is the same statement. The
+     generation changes the names after a plan has gone stale, so the
+     replacement does not collide with what it replaces. *)
+  let statement_name c sql =
+    Printf.sprintf "sqlkit_%s%s"
+      (Digest.to_hex (Digest.string sql))
+      (if c.generation = 0 then "" else "_" ^ string_of_int c.generation)
+
+  (* Returns the statement's reply and whether a cached plan produced it. *)
+  let rec attempt c ~sql ~args =
     begin_request c;
-    match Hashtbl.find_opt c.stmts sql with
-    | Some name ->
-        Wire.bind c.out ~statement:name args;
-        Wire.execute c.out;
-        Wire.sync c.out;
-        write c;
-        (reply (collect c), true)
-    | None ->
-        c.counter <- c.counter + 1;
-        let name = Printf.sprintf "sqlkit_s%d" c.counter in
-        Wire.parse c.out ~name ~sql;
-        Wire.bind c.out ~statement:name args;
-        Wire.execute c.out;
-        Wire.sync c.out;
-        write c;
-        let ((parsed, _, _, _) as result) = collect c in
-        if parsed then Hashtbl.replace c.stmts sql name;
-        (reply result, false)
+    if not c.statement_cache then begin
+      (* The unnamed statement, parsed every time. Still one write and one
+         round trip, and nothing is left behind on the backend. *)
+      Wire.parse c.out ~name:"" ~sql;
+      Wire.bind c.out ~statement:"" args;
+      Wire.execute c.out;
+      Wire.sync c.out;
+      write c;
+      (reply (collect c), false)
+    end
+    else
+      match Hashtbl.find_opt c.stmts sql with
+      | Some name ->
+          Wire.bind c.out ~statement:name args;
+          Wire.execute c.out;
+          Wire.sync c.out;
+          write c;
+          (reply (collect c), true)
+      | None -> (
+          let name = statement_name c sql in
+          Wire.parse c.out ~name ~sql;
+          Wire.bind c.out ~statement:name args;
+          Wire.execute c.out;
+          Wire.sync c.out;
+          write c;
+          let ((parsed, _, _, _) as result) = collect c in
+          if parsed then Hashtbl.replace c.stmts sql name;
+          match (reply result, parsed) with
+          | (Refused { Wire.sqlstate = Some "42P05"; _ } as exists), false -> (
+              (* The name is taken on this backend. Names are derived from the
+                 SQL, so it is this statement, prepared by an earlier client
+                 of a pooler that hands backends around. Use it. Inside a
+                 transaction the refusal has already aborted it, and that is
+                 what gets reported. *)
+              Hashtbl.replace c.stmts sql name;
+              match attempt c ~sql ~args with
+              | Refused { Wire.sqlstate = Some "25P02"; _ }, _ -> (exists, false)
+              | answer -> answer)
+          | r, _ -> (r, false))
 
   (* See sqlkit-eio for why a stale plan is retried even inside a transaction:
      the retry is refused with 25P02 there, except for the ROLLBACK or COMMIT
      that has to get through. *)
   let dispatch c ~sql ~args =
-    match attempt c ~sql ~args with
-    | (Refused { Wire.sqlstate = Some ("26000" | "0A000"); _ } as stale), true -> (
-        Hashtbl.remove c.stmts sql;
-        match attempt c ~sql ~args with
-        | Refused { Wire.sqlstate = Some "25P02"; _ }, _ -> stale
-        | r, _ -> r)
-    | r, _ -> r
+    (* Behind a pooler without prepared-statement support each attempt can
+       land on a different backend, one that lacks the statement or already
+       has it, so one retry is not always enough. The bound keeps a server
+       that always answers "stale" from holding the caller forever. *)
+    let rec go ~first ~tries =
+      match attempt c ~sql ~args with
+      | (Refused { Wire.sqlstate = Some (("26000" | "0A000") as code); _ } as stale), true
+        when tries > 0 ->
+          Hashtbl.remove c.stmts sql;
+          if code = "0A000" then c.generation <- c.generation + 1;
+          go ~first:(Some (Option.value first ~default:stale)) ~tries:(tries - 1)
+      | Refused { Wire.sqlstate = Some "25P02"; _ }, _ when first <> None ->
+          Option.get first
+      | r, _ -> r
+    in
+    go ~first:None ~tries:4
 
   let fatal c (f : Wire.fields) =
     c.broken
@@ -193,7 +237,8 @@ module Raw = struct
         || code = "57P01" || code = "57P02" || code = "57P03"
     | None -> false
 
-  (* libpq's wording, so messages read the same whichever driver produced them. *)
+  (* The primary line in libpq's wording. libpq's own message goes on to repeat
+     the detail and hint; here those stay in their fields only. *)
   let of_fields (f : Wire.fields) =
     Sqlkit.Driver.error
       (if f.sqlstate = None then f.message else f.severity ^ ":  " ^ f.message)
@@ -577,8 +622,8 @@ let readable socket () =
           | _ -> `Yes
           | exception Unix.Unix_error _ -> `Unknown)
 
-let establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statements
-    (info : Conninfo.t) =
+let establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statement_cache
+    ~statements (info : Conninfo.t) =
   let attempt (addr, unix) =
     let socket = Eio.Net.connect ~sw net addr in
     let ready = ref false in
@@ -622,7 +667,8 @@ let establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statements
                   received = 0;
                   busy = false;
                   stmts = Hashtbl.create 16;
-                  counter = 0;
+                  statement_cache;
+                  generation = 0;
                   transaction = Wire.Idle;
                   broken = false;
                   closed = false;
@@ -678,7 +724,7 @@ let validate ~limits ~connect_timeout ~query_timeout ~max_result_bytes conninfo 
 (* A connect_timeout in the connection string can shorten the deadline, never
    extend it past what the caller asked for. *)
 let open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout ~max_result_bytes
-    (info : Conninfo.t) =
+    ~statement_cache (info : Conninfo.t) =
   let connect_timeout =
     match info.connect_timeout with
     | Some seconds -> Float.min seconds connect_timeout
@@ -689,7 +735,8 @@ let open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout ~max_result
       match
         Eio.Time.Timeout.run (Eio.Time.Timeout.seconds clock connect_timeout) (fun () ->
             Ok
-              (establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statements info))
+              (establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statement_cache
+                 ~statements info))
       with
       | Ok r -> r
       | Error `Timeout ->
@@ -698,8 +745,8 @@ let open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout ~max_result
                { operation = "connect"; phase = Connect; seconds = connect_timeout }))
 
 let connect ~sw ~net ~clock ?(limits = Sqlkit.Limits.default) ?(connect_timeout = 10.)
-    ?(query_timeout = 35.) ?(max_result_bytes = default_max_result_bytes) ?observe
-    conninfo =
+    ?(query_timeout = 35.) ?(max_result_bytes = default_max_result_bytes)
+    ?(statement_cache = true) ?observe conninfo =
   let clock = (clock :> clock) in
   Result.bind
     (validate ~limits ~connect_timeout ~query_timeout ~max_result_bytes conninfo)
@@ -712,20 +759,20 @@ let connect ~sw ~net ~clock ?(limits = Sqlkit.Limits.default) ?(connect_timeout 
               Sqlkit.Driver.release conn);
           conn)
         (open_raw ~sw ~net ~clock ~limits ~connect_timeout ~query_timeout
-           ~max_result_bytes info))
+           ~max_result_bytes ~statement_cache info))
 
 module Pool = struct
   include Sqlkit_pool_eio.Make (Raw) (Raw)
 
   let create ~sw ~net ~clock ?(max_size = 10) ?(acquire_timeout = 5.)
       ?(connect_timeout = 10.) ?(query_timeout = 35.)
-      ?(max_result_bytes = default_max_result_bytes) ?(limits = Sqlkit.Limits.default)
-      ?(observe = Sqlkit.Telemetry.ignore) conninfo =
+      ?(max_result_bytes = default_max_result_bytes) ?(statement_cache = true)
+      ?(limits = Sqlkit.Limits.default) ?(observe = Sqlkit.Telemetry.ignore) conninfo =
     let mono = (clock :> clock) in
     Result.bind
       (validate ~limits ~connect_timeout ~query_timeout ~max_result_bytes conninfo)
       (fun info ->
         create ~sw ~clock ~max_size ~acquire_timeout ~observe (fun () ->
             open_raw ~sw ~net ~clock:mono ~limits ~connect_timeout ~query_timeout
-              ~max_result_bytes info))
+              ~max_result_bytes ~statement_cache info))
 end

@@ -15,7 +15,7 @@ done and deferred. Read the relevant section before changing a decision.
 ## Environment
 
 ```
-docker compose up -d           # PostgreSQL 18 on 127.0.0.1:55432
+docker compose up -d           # PostgreSQL 18 on 127.0.0.1:55432 (15 is the minimum supported)
 export DATABASE_URL=postgresql://sqlkit:sqlkit@127.0.0.1:55432/sqlkit
 ```
 
@@ -42,6 +42,10 @@ dune exec example/e2e.exe      # end-to-end against Postgres (libpq driver)
 dune exec example/e2e.exe -- --driver eio      # same suite plus eio_checks, libpq async driver
 dune exec example/e2e.exe -- --driver pgwire   # same again, pure OCaml driver
 dune exec example/soak.exe -- pgwire 60 1      # randomized soak (eio|pgwire, seconds, seed)
+dune exec example/chaos.exe -- pgwire plain 60 1         # fault-injecting proxy (eio|pgwire, plain|tls:CA.pem)
+dune exec example/differential.exe -- 5000 1             # pgwire against libpq, statement by statement
+docker compose up -d pgbouncer pgbouncer-prepared        # transaction-mode poolers on 56432/56433, for:
+dune exec example/pooler_checks.exe -- pgwire            # (eio|pgwire)
 docker compose up -d postgres-tls              # TLS + MD5 server on 55433, for:
 docker exec sqlkit-pg-tls cat /var/lib/sqlkit-tls/ca.pem > /tmp/sqlkit-ca.pem
 dune exec example/pgwire_checks.exe -- /tmp/sqlkit-ca.pem

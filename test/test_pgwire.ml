@@ -275,6 +275,16 @@ let hardening () =
   check "require_auth: mixed forms refused"
     (refused "host=a user=u require_auth=md5,!password");
   check "require_auth: unknown method refused" (refused "host=a user=u require_auth=gss");
+  (match
+     parse
+       "postgresql://u@h/d?channel_binding=disable&gssencmode=disable&target_session_attrs=any"
+   with
+  | Ok c -> check "libpq's spelled-out defaults are accepted" (c.host = "h")
+  | Error why -> check ("inert parameters: " ^ why) false);
+  check "but not when they ask for something"
+    (refused "postgresql://u@h/d?gssencmode=require");
+  check "nor target_session_attrs other than any"
+    (refused "host=a user=u target_session_attrs=read-write");
   (match parse "host=a user=u connect_timeout=3" with
   | Ok c -> check "connect_timeout is kept" (c.connect_timeout = Some 3.)
   | Error why -> check ("connect_timeout: " ^ why) false);

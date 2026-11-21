@@ -177,6 +177,17 @@ let known =
     "connect_timeout";
   ]
 
+(* Parameters whose only accepted value is the one that asks for nothing. They
+   are allowed so that a connection string written for libpq, spelling out its
+   defaults, does not have to be edited; any other value is refused. *)
+let inert =
+  [
+    ("channel_binding", [ "disable" ]);
+    ("gssencmode", [ "disable" ]);
+    ("target_session_attrs", [ "any" ]);
+    ("sslnegotiation", [ "postgres" ]);
+  ]
+
 (* Variables libpq would act on and this driver cannot. Ignoring one would
    quietly weaken or redirect a connection the operator configured through the
    environment. *)
@@ -209,6 +220,18 @@ let parse s =
       || String.starts_with ~prefix:"postgres://" s
     then uri s
     else keywords s
+  in
+  let* pairs =
+    match
+      List.find_opt
+        (fun (k, v) ->
+          match List.assoc_opt k inert with
+          | Some ok -> not (List.mem v ok)
+          | None -> false)
+        pairs
+    with
+    | Some (k, v) -> Error (Printf.sprintf "unsupported value %S for %s" v k)
+    | None -> Ok (List.filter (fun (k, _) -> not (List.mem_assoc k inert)) pairs)
   in
   let keys = List.map fst pairs in
   match

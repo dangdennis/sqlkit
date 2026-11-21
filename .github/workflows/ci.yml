@@ -87,16 +87,19 @@ jobs:
             ptime uuidm decimal yojson \
             cmdliner otoml conf-postgresql \
             caqti caqti-eio caqti-driver-postgresql eio_main \
+            eio mtime uri postgresql cstruct \
+            tls-eio ca-certs x509 domain-name ipaddr \
+            mirage-crypto-rng digestif base64 eqaf \
             ocamlformat.0.29.0 odoc
 
       - name: Build
         run: opam exec -- dune build
 
-      # Release isolation: only the three packages are visible, so a dependency
+      # Release isolation: only the published packages are visible, so a dependency
       # on anything unattached (example/, test-only libs) fails here, not on an
       # opam consumer's machine.
       - name: Packages build in isolation
-        run: opam exec -- dune build -p sqlkit,sqlkit-postgresql,sqlkit-caqti @install
+        run: opam exec -- dune build -p sqlkit,sqlkit-postgresql,sqlkit-caqti,sqlkit-pool-eio,sqlkit-eio,sqlkit-pgwire @install
 
       - name: Unit tests (no database)
         run: opam exec -- dune test
@@ -106,6 +109,22 @@ jobs:
 
       - name: End-to-end (libpq driver)
         run: opam exec -- dune exec example/e2e.exe
+
+      # The same suite over the two Eio drivers, each followed by the checks
+      # they share (pool, deadlines, cancellation reaching the server).
+      - name: End-to-end (libpq async driver)
+        run: opam exec -- dune exec example/e2e.exe -- --driver eio
+
+      - name: End-to-end (pure OCaml driver)
+        run: opam exec -- dune exec example/e2e.exe -- --driver pgwire
+
+      - name: Pure OCaml driver agrees with libpq
+        run: opam exec -- dune exec example/differential.exe -- 5000 1
+
+      - name: Fault injection (both Eio drivers)
+        run: |
+          opam exec -- dune exec example/chaos.exe -- pgwire plain 30 1
+          opam exec -- dune exec example/chaos.exe -- eio plain 30 1
 
       - name: Examples (single connection, and Caqti pool)
         run: |

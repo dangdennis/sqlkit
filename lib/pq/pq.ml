@@ -222,7 +222,7 @@ module Async = struct
   external get_result_raw : conn -> res = "sqlkit_pq_get_result_nb"
   external put_copy_data_raw : conn -> string -> int = "sqlkit_pq_put_copy_data_nb"
   external put_copy_end_raw : conn -> int = "sqlkit_pq_put_copy_end_nb"
-  external cancel : conn -> bool = "sqlkit_pq_cancel_detached"
+  external cancel : conn -> Unix.file_descr -> bool = "sqlkit_pq_cancel_detached"
 
   let connect_start conninfo =
     let c = connect_start_raw conninfo in

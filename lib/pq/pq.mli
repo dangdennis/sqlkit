@@ -142,7 +142,9 @@ module Async : sig
   val status : res -> status
   (** [Finished] covers success and failure alike; pass the result to {!check}. *)
 
-  val cancel : conn -> bool
-  (** Ask the server to stop the running command, without waiting for the answer. Safe to
-      [finish] the connection straight afterwards. Best effort. *)
+  val cancel : conn -> Unix.file_descr -> bool
+  (** Ask the server to stop the running command, on a thread of its own. When the request
+      has been delivered (or has failed) the thread writes one byte to the descriptor and
+      closes it. [false] means no thread was started and the descriptor is still the
+      caller's. Safe to [finish] the connection at any point. Best effort. *)
 end

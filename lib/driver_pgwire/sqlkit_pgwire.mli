@@ -4,6 +4,9 @@
     the cancel request and the TLS handshake all run as fibers, and a result is decoded
     straight from the socket buffer.
 
+    Supports PostgreSQL 15 and later. Older servers are not refused, but nothing is tested
+    against them.
+
     Supported: TCP and Unix-domain sockets; trust, password, MD5 and SCRAM-SHA-256
     authentication (without channel binding); TLS through [sslmode] [prefer], [require],
     [verify-ca] and [verify-full], with the system trust store or [sslrootcert];
@@ -15,6 +18,26 @@
     SCRAM channel binding, and the [PG*] environment variables that ask for any of these.
     Passwords are sent as given, without SASLprep, which only matters for non-ASCII
     passwords. Use [sqlkit-eio] where one of these is required.
+
+    {2 Connection poolers}
+
+    Prepared statements are named after a digest of their SQL, so a backend shared with
+    other clients of this driver holds the same statement under the same name. That keeps
+    results correct behind PgBouncer, but each mode has its terms:
+
+    - session pooling: works as a direct connection does.
+    - transaction pooling with PgBouncer 1.21 or later and [max_prepared_statements] set:
+      works. After a table changes shape, a cached [SELECT *] keeps failing with [0A000]
+      until the client reconnects, because PgBouncer reuses the server's plan for
+      identical text; and [DEALLOCATE ALL] or [DISCARD ALL] costs the connection.
+    - transaction pooling without that support: pass [~statement_cache:false]. Every
+      statement is then parsed afresh as the unnamed statement, still in one round trip.
+      With the cache left on, statements fail inside transactions whenever a backend does
+      not yet hold, or already holds, the name.
+
+    Behind any pooler, cancelling a statement stops it on the server but the next
+    connection may be given the same backend, and session state is shared more widely than
+    the pool's own borrowers.
 
     {2 What the defaults do and do not protect}
 
@@ -57,6 +80,7 @@ val connect :
   ?connect_timeout:float ->
   ?query_timeout:float ->
   ?max_result_bytes:int ->
+  ?statement_cache:bool ->
   ?observe:Sqlkit.Telemetry.observer ->
   string ->
   (Sqlkit.conn, Sqlkit.Error.t) result
@@ -85,6 +109,7 @@ module Pool : sig
     ?connect_timeout:float ->
     ?query_timeout:float ->
     ?max_result_bytes:int ->
+    ?statement_cache:bool ->
     ?limits:Sqlkit.Limits.t ->
     ?observe:Sqlkit.Telemetry.observer ->
     string ->

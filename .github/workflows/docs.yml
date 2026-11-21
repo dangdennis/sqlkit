@@ -39,6 +39,9 @@ jobs:
             ptime uuidm decimal yojson \
             cmdliner otoml conf-postgresql \
             caqti caqti-eio caqti-driver-postgresql eio_main \
+            eio mtime uri postgresql cstruct \
+            tls-eio ca-certs x509 domain-name ipaddr \
+            mirage-crypto-rng digestif base64 eqaf \
             odoc
 
       - name: Build documentation

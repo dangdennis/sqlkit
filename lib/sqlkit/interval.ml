@@ -51,6 +51,9 @@ let make_opt ?years ?months ?days ?hours ?minutes ?seconds ?micros () =
 
 let equal a b = a.months = b.months && a.days = b.days && a.micros = b.micros
 
+(* One field for the whole time part. PostgreSQL 15 and later read it as 64
+   bits; earlier versions read 32, which is one reason 15 is the oldest
+   supported version. *)
 let to_string t =
   Printf.sprintf "%d mons %d days %Ld microseconds" t.months t.days t.micros
 
