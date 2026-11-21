@@ -266,6 +266,34 @@ let () =
      with
     | Ok (Error _) -> true
     | _ -> false);
+  (* ---- failed connects must not cost a descriptor each ---- *)
+  let descriptors () = Array.length (Sys.readdir "/dev/fd") in
+  let before = descriptors () in
+  for _ = 1 to 200 do
+    ignore
+      (connect
+         "host=127.0.0.1 port=1 user=sqlkit password=x dbname=sqlkit sslmode=disable")
+  done;
+  (* a name that resolves to an address nothing listens on before one that
+     works: the first attempt of every connection fails *)
+  let through_localhost = ref 0 in
+  for _ = 1 to 50 do
+    Eio.Switch.run (fun attempt_sw ->
+        match
+          Sqlkit_pgwire.connect ~sw:attempt_sw ~net:env#net ~clock:env#mono_clock
+            (base "localhost" ^ " sslmode=require")
+        with
+        | Ok _ -> incr through_localhost
+        | Error _ -> ())
+  done;
+  Eio.Fiber.yield ();
+  Eio.Time.Mono.sleep env#mono_clock 0.05;
+  let after = descriptors () in
+  Printf.printf
+    "     descriptors: %d before, %d after 250 connects (%d via localhost)\n%!" before
+    after !through_localhost;
+  check "refused and half-failed connects leave no descriptors behind"
+    (after <= before + 2);
   (* ---- names that cannot be checked against a certificate ---- *)
   refuses "verify-full refuses a host it cannot compare with the certificate"
     (base "a_b.localhost" ^ " sslmode=verify-full sslrootcert=" ^ root);

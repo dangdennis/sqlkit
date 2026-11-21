@@ -78,6 +78,9 @@ val copy_from : conn -> sql:string -> rows:string list -> (int, diag) result
     the connection stays usable even when the server aborts mid-stream. Returns rows
     written. *)
 
+val cmd_status : res -> string
+(** The command tag, such as [INSERT 0 1] or [ROLLBACK]. *)
+
 val fmod : res -> int -> int
 val monotonic_time : unit -> float
 val connect_timeout : string -> int -> conn

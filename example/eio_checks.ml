@@ -71,6 +71,16 @@ let driver ~check admin =
   check "a forgotten ROLLBACK still ends the transaction" (exec "ROLLBACK" = Ok None);
   check "and the statement works again afterwards"
     (rows "SELECT * FROM eio_checks" = Ok [ [| Text "1"; Null |] ]);
+  (* COMMIT in a failed transaction: the server says yes and rolls back. *)
+  ignore (exec "BEGIN");
+  ignore (exec "INSERT INTO eio_checks VALUES (40)");
+  ignore (exec "INSERT INTO eio_checks VALUES (1)");
+  check "COMMIT of a failed transaction is reported as the rollback it is"
+    (match exec "COMMIT" with Error e -> driver_code e = Some "25P02" | Ok _ -> false);
+  check "and nothing from it was kept"
+    (rows "SELECT count(*) FROM eio_checks WHERE id = 40" = Ok [ [| Text "0" |] ]);
+  ignore (exec "BEGIN");
+  check "an ordinary COMMIT still succeeds" (exec "COMMIT" = Ok None);
   check "copy needs a COPY statement"
     (match D.copy raw ~sql:"SELECT 1" ~rows:[] with Error _ -> true | Ok _ -> false);
   check "copy streams rows"

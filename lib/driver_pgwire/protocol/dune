@@ -5,4 +5,4 @@
 (library
  (name pgwire_protocol)
  (public_name sqlkit-pgwire.protocol)
- (libraries sqlkit digestif base64 eqaf uri))
+ (libraries sqlkit unix digestif base64 eqaf uri))

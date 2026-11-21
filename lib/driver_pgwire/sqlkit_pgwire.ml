@@ -41,6 +41,7 @@ module Raw = struct
     stmts : (string, string) Hashtbl.t;
     statement_cache : bool;
     mutable generation : int;
+    mutable last_tag : string;
     mutable transaction : Wire.transaction;
     mutable broken : bool;
     mutable closed : bool;
@@ -146,12 +147,48 @@ module Raw = struct
     in
     go ~parsed:false ~rows:[] ~tag:None ~error:None
 
-  let reply (_, rows, tag, error) =
+  let reply c (_, rows, tag, error) =
+    c.last_tag <- Option.value tag ~default:"";
     match error with
     | Some f -> Refused f
     | None -> Rows (List.rev rows, Option.bind tag Wire.affected)
 
   (* Returns the statement's reply and whether a cached plan produced it. *)
+  (* The first keyword of a statement, lower case. *)
+  let first_word sql =
+    let n = String.length sql in
+    let rec skip i =
+      if i < n && (sql.[i] = ' ' || sql.[i] = '\n' || sql.[i] = '\t' || sql.[i] = '\r')
+      then skip (i + 1)
+      else i
+    in
+    let start = skip 0 in
+    let rec stop i =
+      if
+        i < n && ((sql.[i] >= 'a' && sql.[i] <= 'z') || (sql.[i] >= 'A' && sql.[i] <= 'Z'))
+      then stop (i + 1)
+      else i
+    in
+    String.lowercase_ascii (String.sub sql start (stop start - start))
+
+  (* Only statements with a plan worth keeping are prepared by name. Above
+     all, transaction control never is: a COMMIT whose cached name has gone
+     missing would fail, abort the transaction, be retried, and then succeed
+     as a rollback. *)
+  let plans sql =
+    match first_word sql with
+    | "select" | "insert" | "update" | "delete" | "with" | "merge" | "values" | "table" ->
+        true
+    | _ -> false
+
+  (* PostgreSQL answers COMMIT in a failed transaction with success and the
+     tag ROLLBACK. To a caller that is an acknowledged commit that never
+     happened, so it is turned into the error it is. *)
+  let rolled_back ~sql ~tag =
+    tag = "ROLLBACK" && match first_word sql with "commit" | "end" -> true | _ -> false
+
+  let commit_refused = "COMMIT rolled back: the transaction had already failed"
+
   (* A statement's name is a digest of its text, not a counter. Behind a
      pooler in transaction mode one backend serves many clients; with counters
      two clients would both call their first statement "s1", and the second
@@ -167,7 +204,7 @@ module Raw = struct
   (* Returns the statement's reply and whether a cached plan produced it. *)
   let rec attempt c ~sql ~args =
     begin_request c;
-    if not c.statement_cache then begin
+    if not (c.statement_cache && plans sql) then begin
       (* The unnamed statement, parsed every time. Still one write and one
          round trip, and nothing is left behind on the backend. *)
       Wire.parse c.out ~name:"" ~sql;
@@ -175,7 +212,7 @@ module Raw = struct
       Wire.execute c.out;
       Wire.sync c.out;
       write c;
-      (reply (collect c), false)
+      (reply c (collect c), false)
     end
     else
       match Hashtbl.find_opt c.stmts sql with
@@ -184,7 +221,7 @@ module Raw = struct
           Wire.execute c.out;
           Wire.sync c.out;
           write c;
-          (reply (collect c), true)
+          (reply c (collect c), true)
       | None -> (
           let name = statement_name c sql in
           Wire.parse c.out ~name ~sql;
@@ -194,7 +231,7 @@ module Raw = struct
           write c;
           let ((parsed, _, _, _) as result) = collect c in
           if parsed then Hashtbl.replace c.stmts sql name;
-          match (reply result, parsed) with
+          match (reply c result, parsed) with
           | (Refused { Wire.sqlstate = Some "42P05"; _ } as exists), false -> (
               (* The name is taken on this backend. Names are derived from the
                  SQL, so it is this statement, prepared by an earlier client
@@ -295,6 +332,8 @@ module Raw = struct
         then Error (client_diag "statement is larger than PostgreSQL accepts")
         else
           match dispatch c ~sql ~args with
+          | Rows _ when rolled_back ~sql ~tag:c.last_tag ->
+              Error { (client_diag commit_refused) with sqlstate = Some "25P02" }
           | Rows (rows, affected) -> Ok (rows, affected)
           | Refused f -> Error f)
 
@@ -622,13 +661,41 @@ let readable socket () =
           | _ -> `Yes
           | exception Unix.Unix_error _ -> `Unknown)
 
+(* A switch that belongs to one physical connection. Eio attaches a socket to
+   the switch it is opened under before it connects, so a connect that fails
+   leaves its descriptor there until that switch ends. Under the pool's switch
+   that is the life of the process: one leaked descriptor per refused
+   connection, and an outage of a few seconds exhausts the limit. Each attempt
+   therefore gets a switch of its own, released when the attempt fails or the
+   connection closes. The daemon holds it open in between and goes away with
+   the caller's switch. *)
+let scoped ~sw =
+  let ready, set_ready = Eio.Promise.create () in
+  let stop, set_stop = Eio.Promise.create () in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+      Eio.Switch.run (fun inner ->
+          Eio.Promise.resolve set_ready inner;
+          Eio.Promise.await stop);
+      `Stop_daemon);
+  ( Eio.Promise.await ready,
+    fun () -> if not (Eio.Promise.is_resolved stop) then Eio.Promise.resolve set_stop ()
+  )
+
 let establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statement_cache
     ~statements (info : Conninfo.t) =
   let attempt (addr, unix) =
-    let socket = Eio.Net.connect ~sw net addr in
+    let owner, release = scoped ~sw in
+    let socket =
+      match Eio.Net.connect ~sw:owner net addr with
+      | socket -> socket
+      | exception e ->
+          release ();
+          raise e
+    in
     let ready = ref false in
     let shutdown () =
-      try Eio.Resource.close socket with Invalid_argument _ | Eio.Io _ -> ()
+      (try Eio.Resource.close socket with Invalid_argument _ | Eio.Io _ -> ());
+      release ()
     in
     Raw.with_cleanup
       ~finally:(fun () -> if not !ready then shutdown ())
@@ -669,6 +736,7 @@ let establish ~sw ~net ~clock ~query_timeout ~max_result_bytes ~statement_cache
                   stmts = Hashtbl.create 16;
                   statement_cache;
                   generation = 0;
+                  last_tag = "";
                   transaction = Wire.Idle;
                   broken = false;
                   closed = false;

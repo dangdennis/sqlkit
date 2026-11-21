@@ -98,7 +98,7 @@ module Raw = struct
     else A.get_result c.raw
 
   type reply =
-    | Rows of Sqlkit.Value.t array list * int option
+    | Rows of Sqlkit.Value.t array list * int option * string
     | Refused of Pq.diag
     | Skipped
 
@@ -121,7 +121,7 @@ module Raw = struct
                           if Pq.getisnull r i j then Sqlkit.Value.Null
                           else Sqlkit.Value.Text (Pq.getvalue r i j)))
                 in
-                Rows (rows, int_of_string_opt (Pq.cmd_tuples_text r))))
+                Rows (rows, int_of_string_opt (Pq.cmd_tuples_text r), Pq.cmd_status r)))
 
   let refused = function Refused _ -> true | Rows _ | Skipped -> false
 
@@ -154,6 +154,41 @@ module Raw = struct
 
   let confused c = fail c "unexpected reply to a pipelined statement"
 
+  (* The first keyword of a statement, lower case. *)
+  let first_word sql =
+    let n = String.length sql in
+    let rec skip i =
+      if i < n && (sql.[i] = ' ' || sql.[i] = '\n' || sql.[i] = '\t' || sql.[i] = '\r')
+      then skip (i + 1)
+      else i
+    in
+    let start = skip 0 in
+    let rec stop i =
+      if
+        i < n && ((sql.[i] >= 'a' && sql.[i] <= 'z') || (sql.[i] >= 'A' && sql.[i] <= 'Z'))
+      then stop (i + 1)
+      else i
+    in
+    String.lowercase_ascii (String.sub sql start (stop start - start))
+
+  (* Only statements with a plan worth keeping are prepared by name. Above
+     all, transaction control never is: a COMMIT whose cached name has gone
+     missing would fail, abort the transaction, be retried, and then succeed
+     as a rollback. *)
+  let plans sql =
+    match first_word sql with
+    | "select" | "insert" | "update" | "delete" | "with" | "merge" | "values" | "table" ->
+        true
+    | _ -> false
+
+  (* PostgreSQL answers COMMIT in a failed transaction with success and the
+     tag ROLLBACK. To a caller that is an acknowledged commit that never
+     happened, so it is turned into the error it is. *)
+  let rolled_back ~sql ~tag =
+    tag = "ROLLBACK" && match first_word sql with "commit" | "end" -> true | _ -> false
+
+  let commit_refused = "COMMIT rolled back: the transaction had already failed"
+
   (* Named after a digest of the SQL, for the reason given in sqlkit-pgwire:
      behind a pooler in transaction mode a counter would let one client run
      another's statement. *)
@@ -164,7 +199,7 @@ module Raw = struct
 
   (* Returns the statement's reply and whether a cached plan produced it. *)
   let rec attempt c ~sql ~args =
-    if not c.statement_cache then begin
+    if not (c.statement_cache && plans sql) then begin
       sent c (A.send_query_params c.raw sql args);
       match sync c with [ r ] -> (r, false) | _ -> confused c
     end
@@ -290,7 +325,13 @@ module Raw = struct
         then Error (client_diag "SQL or parameter contains a NUL byte")
         else
           match dispatch c ~sql ~args with
-          | Rows (rows, affected) -> Ok (rows, affected)
+          | Rows (_, _, tag) when rolled_back ~sql ~tag ->
+              Error
+                {
+                  (client_diag ("ERROR:  " ^ commit_refused)) with
+                  sqlstate = Some "25P02";
+                }
+          | Rows (rows, affected, _) -> Ok (rows, affected)
           | Refused d -> Error d
           | Skipped -> confused c)
 
